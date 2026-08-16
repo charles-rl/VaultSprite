@@ -1,0 +1,9 @@
+- Cannot found qwen2.5:27b model because that is not the model I am looking for. It should be qwen3.8 27B and you can check it using ollama ls.
+- I also can't see the other stuff like boredom and other things.
+- It seems like the agent is huge too, maybe reduce it to about 0.7.
+- Renamed `Implementation Outline.md` to `IMPLEMENTATION_OUTLINE.md`
+- When I click stretchbreak it just says "roll your " so the text after your is blank. Maybe it's white?
+- I also want my throwing to have a little bit more force.
+- Throwing it above the screen results in it infinitely falling. It just keeps on saying pet is floating above floor and always falls.
+- The current model can actually run, I attached a new image called `sprite_test.png` at root and it works. You can read the code in `test_vision.py` to see how you can run it yourself. You can delete them after you read it.
+- Please, use your vision capabilities either by using `test_vision.py` to read an image as a sample and seeing the text or seeing it yourself.
