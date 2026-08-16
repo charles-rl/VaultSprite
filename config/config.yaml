@@ -1,0 +1,74 @@
+# VaultSprite configuration (YAML).
+# Relative paths resolve against the repository root.
+# Machine-specific keys can be overridden via environment variables:
+#   OLLAMA_BASE_URL, OLLAMA_MODEL, LLM_TIMEOUT_S, VISION_ENABLED, VAULT_ROOT, HEALTH_WORK_MIN
+
+app:
+  name: VaultSprite
+  log_level: INFO
+
+window:
+  width: 128            # overlay window size in logical px
+  height: 128
+  fps: 20               # animation tick rate (frame-slicer timer)
+  drag_threshold_px: 5      # press travel before a click becomes a drag (Manhattan distance)
+  click_timeout_ms: 200     # no-move window that confirms a single click
+  flick_speed_threshold: 80.0   # px/s at release required to inject an impulse
+  max_drag_samples: 10
+
+animation:
+  config_path: assets/config.yaml    # sprite FSM matrix (states, frames, transitions)
+  default_frame_ms: 100              # per-frame hold when a state omits duration_ms
+
+stats:
+  tick_ms: 60000                     # one decay step per minute
+  initial: { hunger: 80, energy: 90, boredom: 10 }
+  decay_per_tick: { hunger: -1, energy: -1, boredom: 2 }   # boredom climbs; others fall
+  bounds: [0, 100]
+  critical: { hunger: 25, energy: 20, boredom: 80 }        # edge-triggered signals on crossing
+  pause_when_inactive: true      # decay only while ContextDetector reports WORK
+
+physics:
+  tick_ms: 30
+  gravity_accel: 1.5             # px/tick^2 (koishi template)
+  friction: 0.99                 # horizontal velocity damping per tick
+  max_speed: 25.0                # px/tick hard cap (any axis)
+  fall_terminal: 8.0             # explicit terminal falling speed, px/tick
+  wall_bounce: -0.4              # x-velocity reflection at screen walls
+  impulse_scale: 0.05            # converts release flick px/s to px/tick
+  stand_on_windows: true         # land on foreground-window top edges (Windows only)
+
+context:
+  poll_ms: 5000                  # foreground-title polling cadence
+  # substring-matched (case-insensitive) against the foreground window title.
+  # "visual studio" + "studio code" cover both VS Code and VSCodium-style titles.
+  work_keywords: [vs code, visual studio, studio code, terminal, obsidian, pycharm, intellij, sublime, notepad++, word, excel, slack, teams]
+  play_keywords: [youtube, steam, reddit, netflix, twitch, discord, spotify, chrome]
+
+remote:
+  ollama_base_url: http://localhost:11434/v1   # OpenAI-compatible; append /chat/completions
+  ollama_model: qwen2.5:27b                    # Qwen 27B per outline; VLM id for vision builds
+  llm_timeout_s: 120                           # generous read timeout (remote H100)
+  vision_enabled: true
+  screenshot:
+    max_w: 1024          # downscale target ~1024x768 per outline
+    max_h: 768
+    quality: 80          # JPEG quality (smaller payload than koishi's 95)
+    format: jpeg
+  ask_interval_ms: 300000     # autonomous vision cadence; 0 disables the loop
+  system_prompt: >-
+    You are VaultSprite, a small desktop mascot that watches your screen.
+    Reply in one short sentence (max 25 words). Reference what you actually see.
+
+obsidian:
+  vault_root: Vault          # env VAULT_ROOT; relative paths resolve from repo root
+  events_dir: Memory/Events
+  facts_dir: Memory/Facts
+  journal_dir: Journal
+  date_timezone: utc         # journal/event day bucketing (utc | local)
+
+health:
+  work_threshold_min: 50     # continuous WORK minutes before a stretch nudge (outline: 45-60)
+  nudge_tick_ms: 5000        # WorkTimer tick cadence
+  volume: { step: 0.7, chirp: 1.0, yawn: 0.8 }
+  sounds_dir: assets/sounds

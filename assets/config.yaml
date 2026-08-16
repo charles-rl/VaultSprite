@@ -1,0 +1,64 @@
+pet: vaultsprite
+size:
+- 96
+- 96
+default_frame_ms: 96
+initial_state: idle
+states:
+  idle:
+    sprite: sprites/idle.gif
+    duration_ms: 2400
+    transitions_to:
+    - name: walking
+      probability: 0.35
+    - name: talking
+      probability: 0.15
+    - name: sleeping
+      probability: 0.1
+    - name: idle
+      probability: 0.4
+  walking:
+    sprite: sprites/walking.gif
+    duration_ms: 2600
+    move:
+    - 2
+    - 0
+    transitions_to:
+    - name: idle
+      probability: 0.55
+    - name: talking
+      probability: 0.15
+    - name: sleeping
+      probability: 0.05
+    - name: walking
+      probability: 0.25
+  sleeping:
+    sprite: sprites/sleeping.gif
+    duration_ms: 4800
+    transitions_to:
+    - name: sleeping
+      probability: 0.6
+    - name: idle
+      probability: 0.4
+  talking:
+    sprite: sprites/talking.gif
+    duration_ms: 2800
+    transitions_to:
+    - name: idle
+      probability: 0.95
+    - name: walking
+      probability: 0.05
+  falling:
+    sprite: sprites/falling.gif
+    duration_ms: 3600
+    one_shot: false
+    transitions_to:
+    - name: idle
+      probability: 1.0
+  stretch_nudge:
+    sprite: sprites/stretch_nudge.gif
+    duration_ms: 4200
+    one_shot: true
+    transitions_to:
+    - name: idle
+      probability: 1.0

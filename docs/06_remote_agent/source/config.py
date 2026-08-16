@@ -1,0 +1,191 @@
+import json
+import logging
+import os
+from pet.settings import load_user_settings, save_user_setting, delete_user_settings, settings_path
+
+logger = logging.getLogger(__name__)
+
+
+# key: 包含 type, default, category, needs_restart, hidden, description[, enum, placeholder, minimum, maximum] 键的字典
+# type: "str", "int", "float", "bool", "str_list"
+# category: "connection", "behavior", "appearance", "personality"
+# hidden: False = 在 UI 中显示, True = 高级设置（仅 settings.json）
+_KEY_META = {
+    "BRAIN":                     {"type": "str",      "default": "local",       "category": "connection", "needs_restart": False, "hidden": False, "description": "LLM 调用模式",                           "enum": ["local", "api", "ollama"]},
+    "LLM_MODEL":                 {"type": "str",      "default": "",            "category": "connection", "needs_restart": False, "hidden": False, "description": "LLM 模型名称",                           "placeholder": "mimo-v2.5"},
+    "LLM_KEY":                   {"type": "str",      "default": "",            "category": "connection", "needs_restart": False, "hidden": False, "description": "API Key"},
+    "LLM_URL":                   {"type": "str",      "default": "",            "category": "connection", "needs_restart": False, "hidden": False, "description": "API 地址(需兼容 OpenAI 格式)"},
+    "OLLAMA_BASE_URL":           {"type": "str",      "default": "http://localhost:11434/v1", "category": "connection", "needs_restart": False, "hidden": False, "description": "Ollama 服务地址"},
+    "LLM_TIMEOUT":               {"type": "float",    "default": 20,            "category": "connection", "needs_restart": False, "hidden": False, "description": "LLM 请求超时(秒)"},
+    "LLM_STREAM_TIMEOUT":        {"type": "float",    "default": 120,           "category": "connection", "needs_restart": False, "hidden": False, "description": "流式调用总超时(秒)，超过后降级到本地决策"},
+    "LLM_MAX_RETRIES":           {"type": "int",      "default": 2,             "category": "connection", "needs_restart": False, "hidden": False, "description": "LLM 最大重试次数"},
+    "LLM_RETRY_DELAY":           {"type": "float",    "default": 1,             "category": "connection", "needs_restart": False, "hidden": True,  "description": "重试延迟(秒)"},
+    "LLM_RETRY_MAX_DELAY":       {"type": "float",    "default": 4,             "category": "connection", "needs_restart": False, "hidden": True,  "description": "最大重试延迟(秒)"},
+    "LLM_CACHE_PROMPT":          {"type": "bool",     "default": False,         "category": "connection", "needs_restart": False, "hidden": False, "description": "启用 Prompt 缓存"},
+    "LLM_THINKING_DISABLED":     {"type": "bool",     "default": False,         "category": "connection", "needs_restart": False, "hidden": False, "description": "关闭思考模式"},
+    "LLM_MAX_TOKENS_INTERACT":    {"type": "int",      "default": 1024,           "category": "connection", "needs_restart": False, "hidden": False, "description": "交互模式LLM输出Token上限"},
+    "LLM_MAX_TOKENS_CHAT":        {"type": "int",      "default": 4096,          "category": "connection", "needs_restart": False, "hidden": False, "description": "聊天模式LLM输出Token上限"},
+    "LLM_MAX_TOKENS_AUTONOMOUS":  {"type": "int",      "default": 4096,          "category": "connection", "needs_restart": False, "hidden": False, "description": "自主模式LLM输出Token上限"},
+    "LLM_MAX_TOKENS_SUMMARY":     {"type": "int",      "default": 1024,          "category": "connection", "needs_restart": False, "hidden": True,  "description": "上下文摘要LLM输出Token上限"},
+    "LLM_TEMPERATURE":            {"type": "float",    "default": 0.7,           "category": "connection", "needs_restart": False, "hidden": False, "description": "LLM 采样温度"},
+    "LLM_TOOL_PARALLEL":          {"type": "bool",     "default": True,          "category": "connection", "needs_restart": False, "hidden": True,  "description": "LLM 工具并行调用"},
+    "LLM_TOOLS_ENABLED":          {"type": "bool",     "default": True,          "category": "connection", "needs_restart": False, "hidden": False, "description": "是否可使用工具"},
+    "LLM_TOOL_MAX_ROUNDS":        {"type": "int",      "default": 20,            "category": "connection", "needs_restart": False, "hidden": False, "description": "工具调用最大轮次", "minimum": 10, "maximum": 99},
+    "LLM_ACTION_MIN_DIVISOR":     {"type": "int",      "default": 25,            "category": "connection", "needs_restart": False, "hidden": True,  "description": "动作权重最小除数"},
+    "SCHEDULER_FAST_MS":         {"type": "int",      "default": 1000,          "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "fast_tick 间隔(毫秒)"},
+    "SCHEDULER_MID_MS":          {"type": "int",      "default": 300000,        "category": "behavior",   "needs_restart": False, "hidden": False, "description": "自主决策间隔(毫秒)"},
+    "SCHEDULER_SLOW_MS":         {"type": "int",      "default": 300000,        "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "slow_tick 间隔(毫秒)"},
+    "SCHEDULER_AUTO_START_FAST": {"type": "bool",     "default": True,          "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "自动启动 fast_tick"},
+    "SCHEDULER_AUTO_START_MID":  {"type": "bool",     "default": True,          "category": "behavior",   "needs_restart": False, "hidden": False, "description": "自动启动 mid_tick(自主决策)"},
+    "SCHEDULER_AUTO_START_SLOW": {"type": "bool",     "default": True,          "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "自动启动 slow_tick"},
+    "SCHEDULER_IDLE_TIMEOUT_MS": {"type": "int",      "default": 900000,        "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "空闲超时(毫秒)，超过后进入休眠"},
+    "ACTION_TIMEOUT_MS":         {"type": "int",      "default": 45000,         "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "单个动作超时(毫秒)"},
+    "SANITY_CRITICAL_THRESHOLD": {"type": "int",      "default": 20,            "category": "behavior",   "needs_restart": False, "hidden": False, "description": "理智临界值，低于该值导致异常行为"},
+    "INTERACT_GRABBED_PROMPT":      {"type": "str",   "default": "",            "category": "behavior",   "needs_restart": False, "hidden": False, "description": "被抓取时的自定义回复 prompt"},
+    "INTERACT_RELEASED_PROMPT":     {"type": "str",   "default": "",            "category": "behavior",   "needs_restart": False, "hidden": False, "description": "被放下时的自定义回复 prompt"},
+    "INTERACT_WINDOW_DISAPPEARED_PROMPT": {"type": "str", "default": "",        "category": "behavior",   "needs_restart": False, "hidden": False, "description": "窗口消失时的自定义回复 prompt"},
+    "INTERACT_FED_PROMPT":          {"type": "str",   "default": "",            "category": "behavior",   "needs_restart": False, "hidden": True,  "description": "喂食交互的自定义 prompt 模板"},
+    "VISION_ENABLED":            {"type": "bool",     "default": False,         "category": "appearance", "needs_restart": False, "hidden": False, "description": "启用视觉理解(需多模态模型支持)"},
+    "VISION_SCALE":              {"type": "float",    "default": 0.7,          "category": "appearance", "needs_restart": False, "hidden": False, "description": "截图缩放比例(0.1~1.0)"},
+    "SCREENSHOT_FORMAT":         {"type": "str",      "default": "jpeg",       "category": "appearance", "needs_restart": False, "hidden": False, "description": "截图编码格式", "enum": ["jpeg", "png"]},
+    "TOOLS_ENABLED":            {"type": "str_list", "default": ["*"],         "category": "appearance", "needs_restart": True,  "hidden": False, "description": "启用的工具插件(逗号分隔, *=全部)"},
+    "PET_WIDTH":                 {"type": "int",      "default": 125,           "category": "appearance", "needs_restart": True,  "hidden": False, "description": "宠物窗口宽度(px)"},
+    "PET_HEIGHT":                {"type": "int",      "default": 125,           "category": "appearance", "needs_restart": True,  "hidden": False, "description": "宠物窗口高度(px)"},
+    "PET_FPS":                   {"type": "int",      "default": 15,            "category": "appearance", "needs_restart": True,  "hidden": True,  "description": "动画帧率"},
+    "BUBBLE_MAX_WIDTH":          {"type": "int",      "default": 300,           "category": "appearance", "needs_restart": True,  "hidden": False, "description": "气泡最大宽度(px)"},
+    "BUBBLE_FONT_SIZE":          {"type": "int",      "default": 14,            "category": "appearance", "needs_restart": True,  "hidden": False, "description": "气泡字号"},
+    "SHOW_TRAY":                 {"type": "bool",     "default": True,          "category": "appearance", "needs_restart": True,  "hidden": False, "description": "显示托盘图标"},
+    "AUTO_START_ON_BOOT":        {"type": "bool",     "default": False,         "category": "appearance", "needs_restart": False, "hidden": False, "description": "开机自动启动"},
+    "HIDE_CONSOLE":              {"type": "bool",     "default": True,          "category": "appearance", "needs_restart": True,  "hidden": True,  "description": "启动时隐藏控制台窗口"},
+    "LOG_LEVEL":                 {"type": "str",      "default": "DEBUG",       "category": "appearance", "needs_restart": False, "hidden": True,  "description": "日志级别(DEBUG/INFO/WARNING/ERROR)"},
+    "CRASH_REPORT_ENABLED":      {"type": "bool",     "default": True,          "category": "appearance", "needs_restart": True,  "hidden": True,  "description": "启用崩溃信息收集(写入 logs/crash 目录)"},
+    "PET_PERSONALITY":           {"type": "str",      "default": "",            "category": "personality", "needs_restart": False, "hidden": False, "description": "宠物人格描述(注入 system prompt)"},
+    "XF_APPID":                  {"type": "str",      "default": "",            "category": "connection", "needs_restart": False, "hidden": False, "description": "讯飞语音听写 APPID"},
+    "XF_API_KEY":                {"type": "str",      "default": "",            "category": "connection", "needs_restart": False, "hidden": False, "description": "讯飞语音听写 API Key"},
+    "XF_API_SECRET":             {"type": "str",      "default": "",            "category": "connection", "needs_restart": False, "hidden": False, "description": "讯飞语音听写 API Secret"},
+    "VOICE_INPUT_ENABLED":       {"type": "bool",     "default": False,         "category": "behavior",   "needs_restart": False, "hidden": False, "description": "启用语音输入"},
+    "VOICE_HOTKEY":              {"type": "str",      "default": "F8",          "category": "behavior",   "needs_restart": False, "hidden": False, "description": "语音输入全局热键"},
+    "EMBEDDING_ENABLED":         {"type": "bool",     "default": False,          "category": "memory",   "needs_restart": True,  "hidden": False, "description": "启用向量记忆(需配置下方 API)"},
+    "EMBEDDING_URL":             {"type": "str",      "default": "",             "category": "memory",   "needs_restart": True,  "hidden": False, "description": "Embedding API 地址(需兼容 OpenAI 格式)", "placeholder": "https://open.bigmodel.cn/api/paas/v4"},
+    "EMBEDDING_KEY":             {"type": "str",      "default": "",             "category": "memory",   "needs_restart": True,  "hidden": False, "description": "Embedding API Key"},
+    "EMBEDDING_MODEL":           {"type": "str",      "default": "",             "category": "memory",   "needs_restart": True,  "hidden": False, "description": "Embedding 模型名", "placeholder": "embedding-3"},
+    "EMBEDDING_DIM":             {"type": "int",      "default": 256,           "category": "memory",   "needs_restart": True,  "hidden": False, "description": "向量维度(需与模型匹配)", "minimum": 64, "maximum": 8192},
+    "EMBEDDING_DEDUP_THRESHOLD": {"type": "float",    "default": 0.6,            "category": "memory",   "needs_restart": False, "hidden": True,  "description": "向量语义去重距离阈值(0~1)"},
+    "MEMORY_MAX_CAPACITY":       {"type": "int",      "default": 200,            "category": "memory",   "needs_restart": False, "hidden": False, "description": "记忆最大容量"},
+    "MEMORY_RECALL_COUNT":       {"type": "int",      "default": 10,             "category": "memory",   "needs_restart": False, "hidden": False, "description": "每次对话召回的记忆条数"},
+    "MEMORY_RECALL_COOLDOWN_S":  {"type": "int",      "default": 300,            "category": "memory",   "needs_restart": False, "hidden": True,  "description": "记忆召回冷却时间(秒)"},
+    "MEMORY_L3_EXPIRE_DAYS":     {"type": "int",      "default": 3,              "category": "memory",   "needs_restart": False, "hidden": False, "description": "L3临时记忆过期天数"},
+    "MEMORY_RERANK_WEIGHT_SIM":  {"type": "float",    "default": 0.7,            "category": "memory",   "needs_restart": False, "hidden": True,  "description": "重排序-语义相似度权重"},
+    "MEMORY_RERANK_WEIGHT_IMP":  {"type": "float",    "default": 0.2,            "category": "memory",   "needs_restart": False, "hidden": True,  "description": "重排序-有效重要性权重"},
+    "MEMORY_RERANK_WEIGHT_RECENCY": {"type": "float", "default": 0.1,           "category": "memory",   "needs_restart": False, "hidden": True,  "description": "重排序-时效性权重"},
+    "CONTEXT_MAX_ENTRIES":       {"type": "int",      "default": 30,             "category": "behavior", "needs_restart": False, "hidden": False, "description": "备选上下文数量上限"},
+    "CONTEXT_HISTORY_ENTRIES":   {"type": "int",      "default": 15,              "category": "behavior", "needs_restart": False, "hidden": False, "description": "每轮注入上下文数量上限"},
+    "CONTEXT_MAX_SUMMARIES":     {"type": "int",      "default": 5,              "category": "behavior", "needs_restart": False, "hidden": True,  "description": "上下文最大摘要数"},
+    "CONTEXT_HALF_LIFE_S":       {"type": "int",      "default": 1800,           "category": "behavior", "needs_restart": False, "hidden": True,  "description": "上下文评分半衰期(秒)"},
+    "CONTEXT_TOKEN_BUDGET":      {"type": "int",      "default": 8192,           "category": "behavior", "needs_restart": False, "hidden": True,  "description": "上下文token预算上限"},
+    
+    "CONTEXT_PERSIST_ENABLED":   {"type": "bool",     "default": True,           "category": "behavior", "needs_restart": False, "hidden": True,  "description": "启用上下文持久化"},
+}
+
+
+def _convert(raw, type_name):
+    """按类型转换字符串/原始值。"""
+    if type_name == "bool":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).lower() in ("1", "true", "yes")
+    if type_name == "int":
+        return int(raw)
+    if type_name == "float":
+        return float(raw)
+    if type_name == "str_list":
+        if isinstance(raw, list):
+            return raw
+        return [s.strip() for s in str(raw).split(",") if s.strip()] if raw else []
+    return str(raw)
+
+
+class Config:
+
+    def __init__(self):
+        self._load_defaults()
+        self._load_user_settings()
+        self._generate_schema()
+
+    def _load_defaults(self):
+        """从 _KEY_META 加载所有默认值到实例属性。"""
+        for key, meta in _KEY_META.items():
+            default = meta["default"]
+            if meta["type"] == "str_list" and isinstance(default, list):
+                default = list(default)
+            setattr(self, key, default)
+
+    _TYPE_MAP = {"str": "string", "int": "integer", "float": "number", "bool": "boolean", "str_list": "array"}
+
+    def _generate_schema(self):
+        """将 settings-schema.json 写入与 settings.json 相同的目录。"""
+        schema = {
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "title": "KoishiAI Settings",
+            "description": "KoishiAI 桌面宠物全部配置项说明。\nhidden: true 的字段不在 UI 显示，可直接编辑 settings.json。\nneeds_restart: true 的字段修改后需重启生效。",
+            "properties": {},
+        }
+        for key, meta in _KEY_META.items():
+            entry = {
+                "type": self._TYPE_MAP.get(meta["type"], "string"),
+                "default": meta["default"],
+                "description": meta.get("description", ""),
+                "category": meta["category"],
+                "needs_restart": meta["needs_restart"],
+                "hidden": meta["hidden"],
+            }
+            if meta.get("enum"):
+                entry["enum"] = meta["enum"]
+            if meta.get("minimum") is not None:
+                entry["minimum"] = meta["minimum"]
+            if meta.get("maximum") is not None:
+                entry["maximum"] = meta["maximum"]
+            schema["properties"][key] = entry
+
+        path = os.path.join(os.path.dirname(settings_path()), "settings-schema.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(schema, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.warning(f"[Config] Failed to write schema: {e}")
+
+    def _load_user_settings(self):
+        """从 settings.json 读取覆盖值并更新实例属性。"""
+        data = load_user_settings()
+        self._user_settings = data
+        for key, value in data.items():
+            if key not in _KEY_META:
+                continue
+            type_name = _KEY_META[key]["type"]
+            try:
+                setattr(self, key, _convert(value, type_name))
+            except (ValueError, TypeError):
+                pass  # 跳过类型转换失败的条目
+
+    def save(self, key: str, value) -> tuple[bool, list[str]]:
+        """将单个设置保存到 settings.json 并更新实例属性。
+
+        返回 (applied, needs_restart):
+          applied: 当前实例是否已更新
+          needs_restart: 需要重启才能生效的键列表（可能包含当前键）
+        """
+        type_name = _KEY_META[key]["type"]
+        converted = _convert(value, type_name)
+        setattr(self, key, converted)
+        save_user_setting(key, converted)
+        needs_restart = [key] if _KEY_META[key]["needs_restart"] else []
+        return (True, needs_restart)
+
+    def reset(self, keys: list[str]):
+        """从 settings.json 移除指定键并回退到 _KEY_META 的默认值。"""
+        delete_user_settings(keys)
+        self._load_defaults()
+        self._load_user_settings()
+
+
+config = Config()

@@ -1,0 +1,92 @@
+"""ContextDetector: pure classification + poll loop with an injected probe."""
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from tests.conftest import FakeConfig, spin
+from vaultsprite.context_detector import (CONTEXT_PLAY, CONTEXT_WORK,
+                                          ContextDetector)
+
+
+@pytest.fixture()
+def titles():
+    """Mutable probe backing: the test sets `titles[0]` to steer classification."""
+    return [""]
+
+
+@pytest.fixture()
+def detector(qapp, titles):
+    cfg = FakeConfig({"context.poll_ms": 30})   # tight cadence for tests
+    det = ContextDetector(cfg, probe=lambda: titles[0])
+    yield det
+    det.stop()
+
+
+# -- pure classification boundaries -------------------------------------------------
+@pytest.mark.parametrize("title,expected", [
+    ("Visual Studio Code - main.py", CONTEXT_WORK),     # outline example
+    ("Ubuntu - /home/u/term  —  Terminal", CONTEXT_WORK),
+    ("Obsidian - VaultSprite.md", CONTEXT_WORK),
+    ("Notepad++ [test.txt*]", CONTEXT_WORK),            # notepad++ is a work keyword
+    ("Steam - Store", CONTEXT_PLAY),                    # outline example
+    ("Google Chrome - youtube.com", CONTEXT_PLAY),      # play wins (no work keyword)
+])
+def test_classify_boundaries(detector, title, expected):
+    assert detector.classify(title) == expected
+
+
+def test_classify_empty_and_unknown(detector):
+    assert detector.classify("") is None            # unknown → no change (keep last)
+    assert detector.classify("Some Random App") is None
+
+
+# -- poll loop: signal only on real changes -------------------------------------------
+def test_signal_fires_on_change_only(detector, titles, qapp):
+    seen = []
+    detector.context_changed.connect(lambda c: seen.append(c))
+
+    titles[0] = "Steam - Store"
+    detector.poll_once()
+    assert seen == [CONTEXT_PLAY]
+
+    titles[0] = "Chrome - some page"                # still play (chrome keyword)
+    detector.poll_once()
+    assert seen == [CONTEXT_PLAY], "no re-emit within the same bucket"
+
+    titles[0] = "Some Random App"                   # unknown → keep last-known PLAY
+    detector.poll_once()
+    assert seen == [CONTEXT_PLAY] and detector.current_context == CONTEXT_PLAY
+
+    titles[0] = "PyCharm - project"
+    detector.poll_once()
+    assert seen == [CONTEXT_PLAY, CONTEXT_WORK]
+
+
+def test_polling_thread_runs_and_stops(detector, titles, qapp):
+    seen = []
+    detector.context_changed.connect(lambda c: seen.append(c))
+    detector.start()
+    assert spin(qapp, lambda: len(seen) == 0 or True, 0.2)   # give the thread a beat
+
+    titles[0] = "Discord - Home"
+    assert spin(qapp, lambda: seen and seen[-1] == CONTEXT_PLAY, timeout_s=3.0), \
+        f"thread never classified; seen={seen}"
+
+    detector.stop()
+    time.sleep(0.1)
+    snapshots = list(seen)
+    for _ in range(15):                             # thread must be dead: no more polls
+        time.sleep(0.03)
+    assert len(seen) == len(snapshots)
+
+
+def test_linux_no_pwc_still_degrades(qapp):
+    """default_title_probe never raises; is_available reflects platform reality."""
+    from vaultsprite.context_detector import default_title_probe, _pwc
+    title = default_title_probe()                   # '' on Linux (no probe), a str elsewhere
+    assert isinstance(title, str)
+    if _pwc is None:
+        det = ContextDetector(FakeConfig())
+        assert not det.is_available()

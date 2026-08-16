@@ -1,0 +1,14 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+
+# Logs & local run artifacts
+logs/
+crash/
+
+# Local vault (memory writes during dev runs) — the app creates it at runtime
+Vault/
