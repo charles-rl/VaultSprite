@@ -2,18 +2,32 @@
 
 PySide6 desktop pet: a transparent always-on-top mascot that walks your taskbar, decays in needs, senses work-vs-play context, watches your screen via a remote Ollama endpoint (Qwen), and journals its life into an Obsidian vault. Built per `Implementation Outline.md` from the extraction docs in `docs/`.
 
-## Quick start
+## Quick start — getting it running on your PC
+
+One prerequisite: install [uv](https://docs.astral.sh/uv/) (`powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`). Everything else is in these three commands:
 
 ```bash
-uv sync --extra dev            # creates .venv (Python 3.13), installs deps
-.venv/bin/python tools/generate_assets.py   # one-time: placeholder mascot + sounds
-QT_QPA_PLATFORM=offscreen uv run pytest     # test suite — 72 tests, headless-safe
-uv run vaultsprite             # launch the pet (real display required for visuals)
+git clone https://github.com/charles-rl/VaultSprite.git && cd VaultSprite
+uv sync              # one-time: downloads Python 3.13 + all libraries into .venv
+uv run vaultsprite   # the mascot appears on your desktop, standing on your taskbar
 ```
 
-Headless boot check (no display needed, ~1.5 s): `uv run vaultsprite --smoke`.
+That's it — placeholder sprites and sounds ship in `assets/`, nothing else to install. **Stop:** right-click the mascot → *Quit VaultSprite* (or Ctrl+C in the terminal).
 
-On Windows everything is real: taskbar floor physics, window-standing falls, foreground-window context detection, and screenshot capture. On Linux dev those paths fall back gracefully (Qt work-area floor, disabled context detector, audio no-op) so the whole system still runs and tests.
+Optional, do later when you want:
+- **Have it watch your screen** — set its Ollama server IP: `$env:OLLAMA_BASE_URL = "http://<H100_IP>:11434/v1"` then launch. Until you do this, the pet works fully; only vision is idle.
+- **Choose where memory goes** — by default it writes `Memory/` + `Journal/` inside a `Vault/` folder in the project root. To use your real Obsidian vault: `$env:VAULT_ROOT = "C:\path\to\your-vault"`.
+- Everything else (sizes, decay speed, stretch-break interval, keyword lists) lives in `config/config.yaml`.
+
+### Linux / headless development
+
+```bash
+uv sync --extra dev                          # + test deps
+QT_QPA_PLATFORM=offscreen uv run pytest      # 72 tests, no display needed
+uv run vaultsprite --smoke                   # ~1.5 s boot check, exits 0/1
+```
+
+On Windows every capability is real (taskbar physics, window-standing falls, context detection, screenshots); on Linux those paths fall back gracefully so the code still runs and tests here.
 
 ## How to navigate this repo (what's in each file)
 
@@ -36,12 +50,11 @@ On Windows everything is real: taskbar floor physics, window-standing falls, for
 - **Memory** (`obsidian_vault.py`) — atomic Markdown with YAML frontmatter: facts under `Memory/Facts/`, events under `Memory/Events/YYYY-MM-DD/`, daily journal at `Journal/YYYY-MM-DD.md`. No Obsidian plugin required; point `obsidian.vault_root` (or `VAULT_ROOT`) at any vault folder.
 - **Health & sound** (`health_audio.py`) — after 45–60 min of continuous work the pet forces a stretch pose, chirps, and asks you to move; preloaded 8-bit SFX play non-blocking via pygame (no-op where no audio device exists).
 
-## Useful commands
+## Useful commands (optional, for later)
 
-```bash
-uv run python tools/render_check.py        # offscreen: proves transparency + live animation
-uv run python -m vaultsprite.main --smoke  # headless boot check, exits 0/1
-.venv/bin/python -c "from vaultsprite.config import load_config; print(load_config().get('remote.ollama_model'))"
+```powershell
+uv run python tools/render_check.py        # proves transparency + live animation; prints PASS and saves PNGs to the temp folder (path printed)
+uv run vaultsprite --smoke                 # ~1.5 s boot check, exits 0/1
 ```
 
-Env-var overrides: `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `LLM_TIMEOUT_S`, `VISION_ENABLED`, `VAULT_ROOT`, `HEALTH_WORK_MIN`. Everything else lives in `config/config.yaml`.
+Env-var overrides (PowerShell shown): `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `LLM_TIMEOUT_S`, `VISION_ENABLED`, `VAULT_ROOT`, `HEALTH_WORK_MIN` — e.g. `$env:OLLAMA_BASE_URL = "http://192.168.1.50:11434/v1"`. Everything else lives in `config/config.yaml`.

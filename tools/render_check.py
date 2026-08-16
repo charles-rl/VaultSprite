@@ -1,14 +1,18 @@
 """Offscreen render check (run under QT_QPA_PLATFORM=offscreen).
 
 Boots App, plays `idle`, pumps frames from the real QMovie path, then:
-- composites the live sprite over a checkerboard → /tmp/vaultsprite_render.png
+- composites the live sprite over a checkerboard → <tempdir>/vaultsprite_render.png
+  (/tmp on Linux, %TEMP% on Windows)
 - asserts corner alpha == 0 (transparency survived) and center alpha > 0
 - captures two frames ~1.4s apart and reports whether they differ
 Exit 0 on success, 1 otherwise.
 """
 import os
+import tempfile
 
+# Headless by design on every platform: force offscreen only if the user did not.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+TMP = tempfile.gettempdir()   # /tmp on Linux, %TEMP% on Windows
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QImage, QPainter
@@ -104,9 +108,11 @@ def main():
                     break
             print(f"animating       : {'yes — frames advance (QMovie live)' if changed else 'no pixel change in sprite region'}")
 
-        # save composite + a magenta-corner alpha proof sheet
+        # save composite + a magenta-corner alpha proof sheet (to the platform tempdir)
+        render_path = os.path.join(TMP, "vaultsprite_render.png")
+        alpha_path = os.path.join(TMP, "vaultsprite_alpha_check.png")
         last = state["canvases"][-1]
-        last.save("/tmp/vaultsprite_render.png")
+        last.save(render_path)
         if corner is not None:
             m = QImage(state["canvases"][0].size(), QImage.Format_ARGB32)
             p = QPainter(m); p.fillRect(0, 0, m.width(), m.height(), QColor(255, 0, 255)); p.end()
@@ -119,7 +125,9 @@ def main():
             print("alpha proof     : corners stay pure magenta →", corners_ok)
             if not corners_ok:
                 ok = False
-            m.save("/tmp/vaultsprite_alpha_check.png")
+            m.save(alpha_path)
+            print(f"saved             : {render_path}")
+            print(f"                    {alpha_path}")
 
         print("RESULT          :", "PASS" if ok else "FAIL")
         app.exit(0 if ok else 1)
