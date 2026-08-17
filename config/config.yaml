@@ -46,7 +46,7 @@ context:
   play_keywords: [youtube, steam, reddit, netflix, twitch, discord, spotify, chrome]
 
 remote:
-  ollama_base_url: http://localhost:11434/v1   # OpenAI-compatible; append /chat/completions
+  ollama_base_url: https://my-ollama-server-11434.jpe1.devtunnels.ms/v1   # OpenAI-compatible; append /chat/completions
   ollama_model: hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL   # verified via `ollama ls`; OLLAMA_MODEL env overrides
   llm_timeout_s: 120                           # generous read timeout (remote H100)
   vision_enabled: true

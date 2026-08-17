@@ -14,3 +14,11 @@
 
 Housekeeping this pass: `uv run pytest` → **74 passed** (2 new physics tests added), `--smoke` exit 0.
 Full changelog + build traps: see `BUILD_NOTES.md` §9 and the M1/M4/M6 sections.
+
+# Recent User Notes
+- I get this message and it just stands there at that point. [vaultsprite.terrain_physics] pet is floating above floor at x=1120; falling. Check your terrain physics code, cross reference it with Shijima-Qt repo see how it handles terrain physics.
+- https://github.com/pixelomer/Shijima-Qt.git Add this to `IMPLEMENTATION_OUTLINE.md` as well as other docs with it. Git clone this repo and study it and apply it to my repo then delete it afterwards.
+- I have added new assets called steve_shimeji, adapt it for this repo and replace your old sprites with this one. If you find sounds in it then use it but you may make your own sounds. You may also delete the old generate assets for the sprites code.
+- When I ask what I see, it freezes so it isn't truly async.
+- It also seems like the context is always switched to work for some reason. You may record logs that will help you debug in the Vault folder, the main goal is for debugging and that you can refer to it when I have concerns or notes about this. I have uploaded the Vault folder that I have on hand and you may delete it afterwards just for testing and debugging.
+- I updated the base_url under config.yaml and that reflects my true base_url when I am using it in my windows PC so swap it when using Linux for debugging or dev purposes.
