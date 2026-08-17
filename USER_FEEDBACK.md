@@ -1,23 +1,13 @@
-# User notes — resolved 2026-08-17 (this pass)
+# User notes — resolved 2026-08-17
 
-| # | Original note | Resolution |
+Recent items (the swing/throw/vision pass) all fixed. Full history lives in `git log` + `BUILD_NOTES.md`.
+
+| # | Note | Resolution |
 |---|---|---|
-| 1 | "Cannot found qwen2.5:27b … it should be qwen3.8 27B, check `ollama ls`" | **Fixed.** `config/config.yaml` → `remote.ollama_model: hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL` (id verified against your `ollama ls`; also the fallback default in `vaultsprite/remote_agent.py`, 4 test pins, and docs/06). The old `qwen2.5:27b` isn't installed here — which is why every vision request silently failed with "model not found". |
-| 2 | "I can't see the other stuff like boredom" | **Explained (likely), no code change.** Nothing about stats was ever *displayed* on screen — but more importantly, while item #1 was broken, **no LLM replies ever showed either** ("what I'm doing" answers all died on the missing model). That's almost certainly what looked like "nothing visible". With a working model, bubbles now appear for: vision replies (auto every 5 min), stat-critical lines (hunger/energy/boredom), stretch nudges. A dedicated always-on stats HUD was deliberately skipped per your call; say the word if you still want one (~30-line feature). |
-| 3 | "Agent is huge, reduce to about 0.7" | **Fixed.** Overlay window 128 → 89 px (`window.width/height` in `config/config.yaml`, ≈0.69×); the sprite scales to it. Reversible via config without code changes. |
-| 4 | "Stretch break says 'roll your' and after that is blank (white?)" | **Fixed — it was real clipping, not color.** The speech bubble sized its height too small for wrapped text; the last line's lower half was painted past the widget edge (dark-on-light = looked like the sentence just stopped). `SpeechBubble` now pre-wraps lines itself and draws each at an explicit baseline with a lineSpacing-based height (`ui_overlay.py`). Verified by compositing the actual widget: a 3-line reply renders fully, bottom included. The stretch line was also shortened to "Stretch break! Stand up and move." so it fits one line anyway. |
-| 5 | "Throwing should have more force" | **Fixed.** `physics.impulse_scale` 0.05 → 0.1 (`config/config.yaml`) — roughly 2× the velocity injected from a flick; hard throws were already hitting the speed cap, so this mostly strengthens medium flicks (which are the normal case). Caps unchanged. |
-| 6 | "Throw above screen → infinite falling ('pet is floating above floor' forever)" | **Fixed.** Two bugs: (a) flight was never clamped at the *top* of the work area — an up-flick ejected the pet off-display and it fell back from thousands of px at terminal velocity, replaying the fall; now it bounces off the screen top like a wall. (b) The side-wall bounce double-negated the velocity (`-vx × -0.4` = still outward), so a thrown pet stuck to / pushed through walls — now a proper rebound. Also: the re-arm log fires once per airborne episode instead of every tick. New regression tests pin both behaviors. |
-| 7 | "Renamed Implementation Outline.md" | **Done (yours) + follow-up:** all 13 remaining title-case citations (`README.md`, `AGENTS.md`, `vaultsprite/main.py`, `docs/INDEX.md`, all 8 module READMEs) now point at `IMPLEMENTATION_OUTLINE.md`. This line stays as the record of your rename. |
-| 8 | "The current model runs; attached sprite_test.png, read test_vision.py" | **Verified + cleaned up.** The build agent reads images natively — no helper script needed. Confirmed directly: `sprite_test.png` is a chibi sticker-style character (spiky brown hair, sunglasses) holding an electric guitar. Both files deleted as offered. Side note for later: it's a much better "mascot" match than the current placeholder blob — worth regenerating sprites around that identity someday (assets untouched this pass). |
-| 9 | "Use your vision capabilities … seeing the text or seeing it yourself" | **Done, throughout.** This session verified by eye: `sprite_test.png`, the offscreen pet render (`/tmp/vaultsprite_render.png` — transparent corners confirmed visually), and a dedicated speech-bubble composite showing the fixed wrapped-text rendering. Also recorded in BUILD_NOTES §7 so future agents know image inspection is first-class here. |
+| 10 | Mascot doesn't sway when swinging Steve | Fixed: inverted conditional-branch skip + missing `FootX` in M9 engine. |
+| 11 | Sprite snaps back to spawn / keeps falling after a swing | Fixed: sync anchor to release feet on drag; forward `ActionReference` overlay attrs (throw now has real velocity). |
+| 12 | "Ask what I see" freezes the GUI | Fixed: blocking LLM call actually runs off-thread (`QThread.run()`); "Thinking…" bubble + thread-id logging added. |
+| 13 | Log debug info to the Vault | Done: drag/throw telemetry → `Memory/Debug/mascot-<day>.md`. |
+| 14 | Swap base_url on Linux | No code change: `OLLAMA_BASE_URL` env overrides config. |
 
-Housekeeping this pass: `uv run pytest` → **86 passed** (M9 mascot engine now wired into App/UI; reference switched to DalekCraft2/Shimeji-Desktop; 12 new engine tests), `--smoke` exit 0.
-Full changelog + build traps: see `BUILD_NOTES.md` §9 and the M1/M4/M6 sections.
-
-# Recent User Notes
-- Check your terrain physics code, cross reference it with module 9 repo see how it handles terrain physics. The mascot engine is not working when I swing steve around it isn't working as well as it should be like sometimes it swings and sways but most of the time it doesn't sway. You may use @explore agents to confirm this since they have vision capabilities maybe feed a series of images. Save multiple frames and then pass it onto the @explore agent then delete the frames.
-- After I sway or swing the sprite, it doesn't move. Instead, it snaps back to where it spawned and keeps on doing the falling or landing animation (?) not sure what the specific animation is called but it water buckets to land.
-- When I ask what I see, it freezes so it isn't truly async.
-- You may record logs that will help you debug in the Vault folder, the main goal is for debugging and that you can refer to it when I have concerns or notes about this. I have uploaded the Vault folder that I have on hand and you may delete it afterwards just for testing and debugging.
-- I updated the base_url under config.yaml and that reflects my true base_url when I am using it in my windows PC so swap it when using Linux for debugging or dev purposes.
+Housekeeping: **115 tests pass**, `--smoke` exit 0, `tools/render_check.py` PASS. Commit `1593dcd`; push pending (no credentials in this shell).
