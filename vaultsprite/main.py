@@ -427,13 +427,14 @@ class App(QObject):
             return
         self._hidden = True
         self._hide_restore = self.window.position()
+        self._hide_target = self._hide_edge_target()
         if self.mascot is not None:
-            self.mascot.set_hidden(True)         # freeze ambient engine
+            # walk off using the engine's walk frames (position-locked; App owns the walk)
+            self.mascot.set_hide_walk(True, moving_right=self._hide_target[0] > self._hide_restore[0])
         else:
             self.physics.stop()                  # legacy mode: freeze movement
             self.window.player.stop()
         self.window.bubble.hide()                # no lingering bubble while away
-        self._hide_target = self._hide_edge_target()
         self._debug_log("mascot", f"hide started from {self._hide_restore} -> target {self._hide_target}")
         self._hide_timer.start()
 
@@ -443,6 +444,9 @@ class App(QObject):
         self._hidden = False
         self.window.show()
         self._hide_target = self._hide_restore   # return to the pre-hide spot
+        if self.mascot is not None:
+            cur_x = self.window.position()[0]
+            self.mascot.set_hide_walk(True, moving_right=self._hide_target[0] > cur_x)
         self._debug_log("mascot", f"show started, returning to {self._hide_target}")
         self._hide_timer.start()
 
@@ -466,6 +470,9 @@ class App(QObject):
         else:
             ny = y + (step if dy > 0 else -step)
         self.window.move_to(nx, ny)
+        if self.mascot is not None:
+            w, h = self.window.size_px()
+            self.mascot.sync_anchor(nx + w // 2, ny + h)   # keep walk frames grounded under the window
         if (nx, ny) == (tx, ty):
             self._hide_timer.stop()
             self._hide_target = None
@@ -474,13 +481,18 @@ class App(QObject):
     def _hide_walk_done(self):
         """Reached the off-screen hide spot or the restore point."""
         if self._hidden:
+            if self.mascot is not None:
+                self.mascot.set_hide_walk(False)
+                self.mascot.set_hidden(True)     # fully freeze while off-screen
             self.window.hide()                   # fully invisible
             return
         # back on screen: hand the anchor back to the engine and resume autonomy
         if self.mascot is not None:
             rx, ry = self._hide_restore or self.window.position()
             self.mascot.sync_anchor(rx, ry)
-            self.mascot.set_hidden(False)
+            self.mascot.set_hide_walk(False)     # stop the position-locked walk
+            self.mascot.set_hidden(False)        # resume ambient (no re-seed)
+            self.mascot.force_behavior("SitDown")  # leave HideWalk → return to idle
         else:
             self.physics.start()
             t = self.fsm.force_state(self.fsm.current_state)

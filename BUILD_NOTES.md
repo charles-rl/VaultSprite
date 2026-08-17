@@ -483,6 +483,44 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ## 9. Changelog
 
+### 2026-08-17 — Feedback pass: landing loop, pendulum sway, mirror, hide-walk, alignment
+1. **Landing no longer sticks on shime18 (the main bug).** Two engine bugs: (a) `Animate`
+   actions (e.g. `Bouncing`, the water-bucket splash) were built as a generic `AnimationAction`
+   that looped forever — the reference `Animate.hasNext()` is `getTime() < getAnimation().getDuration()`
+   (one cycle). Added `AnimateAction` and routed `Animate` to it. (b) `SelectAction` re-inited
+   its *finished* branch via `SequenceAction._child()`, so the Fall `Select` kept replaying
+   Bouncing/Stand and the Fall behavior never ended. Now a finished branch ends the Select
+   (matching C++ `ComplexAction.hasNext()`), so a drop lands → Bouncing once → Stand → back to
+   ambient. This also fixes "throw at super-high speed doesn't come back" and "sway never swings
+   back" — the pet settles instead of looping.
+2. **Pendulum sway (C++ `Dragged`)** — `JSMascot.FootX` was a static `anchor.x`, so the Pinched
+   lean pose was frozen. Ported the damped oscillator `footDx=(footDx+(cursorX-footX)*0.1)*0.8;
+   footX+=footDx` into `_DraggableAction` and exposed `FootX`/`FootDX` from `MascotState.foot_x/
+   foot_dx`. Now the pet leans while the cursor moves and swings back and forth (settling) once it
+   stops. Regression tests: fast-fling produces shime9/10 leans; `foot_dx` sign flips ≥2× then damps.
+3. **Walk no longer flipped** — the pack's `shime*.png` are the LEFT-facing image
+   (`ImagePairs.load` loads the file as `leftImage` and mirrors for the right). `_on_frame`
+   mirrored when `not looking_right` (showed the left art while facing right). Now mirrors when
+   `looking_right`.
+4. **Hide uses the walk animation** — `_begin_hide` previously froze the engine
+   (`set_hidden(True)`) then slid the window with no animation. Added an in-place walk
+   (`InPlaceAction` + synthetic hidden `HideWalk` behavior reusing the pack `Walk` poses) and
+   `MascotEngine.set_hide_walk(active, moving_right)` which keeps the tick timer running, forces
+   `HideWalk`, and suppresses `position_changed` while App steps the window + re-syncs the anchor
+   each `_hide_walk_step`. The engine freezes only once fully off-screen; reveal walks back and
+   resumes ambient (forced `SitDown` to exit HideWalk).
+5. **Wall/ceiling animations now reachable** — `FallAction` ends the fall when the anchor reaches
+   a wall border (C++ `Fall.hasNext()` wall check), so a sideways throw grips the wall; with the
+   `SelectAction` fix the Fall's `GrabWall` (reference `Duration=100`) releases and the ambient
+   "On Work Area Facing the Wall" pool (`ClimbAlongWall`→`ClimbCeiling`) can run. Regression test:
+   hard throw grips the right wall and runs a wall behavior.
+6. **Bubble (#1) + telemetry (#2) alignment** — `show_bubble` now sizes the bubble *before*
+   positioning it (the old order read `width()/height()` as 0/stale → the bubble landed at the
+   window's center, "dead center of my screen") and anchors it above the sprite's opaque bounding
+   box (`_sprite_visual_rect`) instead of the raw window top. Telemetry label padding moved onto
+   the label so text sits flush with the box's top-left.
+Suite 119 → **122**; `--smoke` exit 0; `tools/render_check.py` PASS.
+
 ### 2026-08-17 — Hide/Show feature (walk to nearest edge, pause autonomy)
 1. **Config**: new `hide:` section — `enabled` (default true), `step_ms` (20), `step_px` (6).
 2. **Trigger/reveal**: checkable **"Hide pet"** in the system-tray menu (`hide_toggled` signal) + a right-click "Hide pet" item on the sprite (`hide_requested`). The tray is now created whenever `hide.enabled` OR mascot is on, so reveal always works (incl. legacy-GIF mode). `SystemTray.set_hidden()` syncs the checkbox when hide is triggered from the sprite menu.

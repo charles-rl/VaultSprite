@@ -51,6 +51,57 @@ def test_falls_from_air_and_lands_on_floor():
     assert core.state.anchor.y >= H - 2, f"never landed: y={core.state.anchor.y}"
 
 
+def test_landing_does_not_stick_on_bounce():
+    """A drop must land, play the Bouncing splash (shime18/19) exactly once, stand, then
+    return to AMBIENT behavior — not loop the Bouncing pose forever (the reported "spams
+    the shime18 water-bucket landing and is stuck in an infinite loop").
+
+    Guards two bugs: Animate (Bouncing) used to loop forever, and SelectAction re-inited
+    its finished branch so the Fall sequence never ended."""
+    core = make_core(seed=5)
+    core.state.anchor = Vec2(W // 2, 100)
+    core.force_behavior("Fall")
+    landed = False
+    bounce_seen = False
+    post_land_behaviors: set[str] = set()
+    for _ in range(600):
+        core.tick()
+        if not landed and core.state.anchor.y >= H - 2:
+            landed = True
+        if landed:
+            if core.state.active_frame is not None and "shime18.png" in core.state.active_frame.image:
+                bounce_seen = True
+            post_land_behaviors.add(core.state.behavior_name)
+    assert landed, "pet never landed"
+    assert bounce_seen, "Bouncing splash never played on landing"
+    # after the splash the pet must have moved on from the Fall behavior (e.g. into an
+    # ambient floor behavior), not stay stuck bouncing/falling
+    assert len(post_land_behaviors) > 1, f"pet stuck in one behavior after landing: {post_land_behaviors}"
+
+
+def test_sideways_throw_grabs_wall_and_climbs():
+    """A hard sideways throw reaches the work-area wall and the fall ENDS there (C++
+    Fall.hasNext), leaving the pet ON the wall so the ambient wall pool (ClimbAlongWall /
+    HoldOntoWall / FallFromWall) can run — feedback: climbing-wall animations were never used."""
+    core = make_core(seed=8)
+    core.state.anchor = Vec2(W // 2, 80)
+    core.state.dragging = False
+    core.env.cursor.dx = 80            # hard throw to the right (px/tick) → reaches wall mid-air
+    core.force_behavior("Thrown")
+    wall_seen = False
+    wall_behaviors: set[str] = set()
+    for _ in range(300):
+        core.tick()
+        # anchored on the right wall (within 1px of the work-area right edge)
+        if abs(core.state.anchor.x - W) < 2:
+            wall_seen = True
+            wall_behaviors.add(core.state.behavior_name)
+    assert wall_seen, "pet never reached/gripped the right wall"
+    # the wall grip must have run wall-related behaviors (ClimbAlongWall/HoldOntoWall/...)
+    assert any("Wall" in b or b == "FallFromWall" for b in wall_behaviors), \
+        f"no wall-climbing behavior ran after gripping: {wall_behaviors}"
+
+
 def test_active_frame_recorded():
     core = make_core()
     core.state.anchor = Vec2(W // 2, 100)
@@ -143,14 +194,22 @@ def test_noop_inline_is_tickable():
 
 
 # -- M9 fixes (2026-08-17 pass): sway + throw --------------------------------------
-def _dragged_frames(anchor_x: float, cursor_x: float, seed: int = 3) -> set[str]:
+def _dragged_swing_frames(anchor_x: float, cursor_from: float, cursor_to: float,
+                          seed: int = 3, steps: int = 70) -> set[str]:
+    """Drag while the cursor sweeps from `cursor_from` to `cursor_to` (then holds).
+
+    FootX is a damped oscillator that starts on the cursor and chases it, so a lean pose
+    (shime9/10) appears while the cursor is moving (FootX lags) — matching C++ Dragged —
+    rather than from a static cursor offset."""
     core = make_core(seed=seed)
     core.state.anchor = Vec2(anchor_x, H)
     core.state.dragging = True
-    core.env.cursor.x, core.env.cursor.y = cursor_x, H
+    core.env.cursor.x, core.env.cursor.y = cursor_from, H
     core.force_behavior("Dragged")
     played: set[str] = set()
-    for _ in range(40):
+    sweep = 2                      # fast fling → large transient FootX lag → deep lean
+    for i in range(steps):
+        core.env.cursor.x = cursor_from + (cursor_to - cursor_from) * min(1.0, i / sweep)
         core.tick()
         if core.state.active_frame is not None:
             played.add(core.state.active_frame.image)
@@ -158,13 +217,38 @@ def _dragged_frames(anchor_x: float, cursor_x: float, seed: int = 3) -> set[str]
 
 
 def test_dragged_sways_toward_cursor():
-    """Swinging the cursor far from the (frozen) grab anchor must play the lean frames
-    (shime9/10), not just the neutral Resisting frames. Requires FootX to resolve and the
-    conditional Pinched branches to be evaluated (both were previously broken)."""
-    right = _dragged_frames(anchor_x=200, cursor_x=600)   # cursor far right of anchor
-    assert "shime9.png" in right, f"expected far-right lean in {sorted(right)}"
-    left = _dragged_frames(anchor_x=1100, cursor_x=300)   # cursor far left of anchor
-    assert "shime10.png" in left, f"expected far-left lean in {sorted(left)}"
+    """Swinging the cursor must play the lean frames (shime9/10) while it moves, not just
+    the neutral pose. Requires FootX to resolve, the conditional Pinched branches to be
+    evaluated, and the pendulum oscillator to lag FootX behind a moving cursor."""
+    right = _dragged_swing_frames(anchor_x=200, cursor_from=200, cursor_to=600)
+    assert "shime9.png" in right, f"expected far-right lean while swinging: {sorted(right)}"
+    left = _dragged_swing_frames(anchor_x=1100, cursor_from=1100, cursor_to=300)
+    assert "shime10.png" in left, f"expected far-left lean while swinging: {sorted(left)}"
+
+
+def test_dragged_pendulum_settles():
+    """After the cursor stops, FootX keeps swinging back and forth around it (foot_dx
+    alternates sign) and damps back toward the neutral pose — the 'swing like a pendulum'
+    behavior the sway was missing. This is the C++ Dragged footDx=(footDx+(newX-footX)*0.1)*0.8
+    oscillator, previously absent (FootX was static anchor.x)."""
+    core = make_core(seed=3)
+    core.state.anchor = Vec2(200, H)
+    core.state.dragging = True
+    core.env.cursor.x, core.env.cursor.y = 200, H
+    core.force_behavior("Dragged")
+    for _ in range(3):
+        core.tick()
+    core.env.cursor.x = 600                      # swing far right, then STOP
+    signs: list[int] = []
+    for _ in range(80):
+        core.tick()
+        signs.append(1 if core.state.foot_dx > 0 else (-1 if core.state.foot_dx < 0 else 0))
+    # foot_dx must change sign at least twice (it overshoots and swings back)
+    flips = sum(1 for i in range(1, len(signs)) if signs[i] != 0 and signs[i] != signs[i - 1])
+    assert flips >= 2, f"pendulum never swung back (flips={flips}, signs={signs})"
+    # and it damps: the last few samples are back near the neutral pose (close to cursor)
+    near_cursor = abs(core.state.foot_x - 600) < 40
+    assert near_cursor, f"pendulum did not settle near the cursor (foot_x={core.state.foot_x:.1f})"
 
 
 def test_throw_launches_from_release_position_with_velocity():

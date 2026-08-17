@@ -19,7 +19,7 @@ from PySide6.QtGui import QImage, QImageReader, QPixmap, QCursor, QTransform
 from PySide6.QtWidgets import QApplication
 
 from .config import Config, load_config
-from .mascot_engine import MascotCore
+from .mascot_engine import BehaviorDef, BehaviorNode, InPlaceAction, MascotCore
 from .mascot_environment import DArea, HBorder, MascotEnvironment
 
 logger = logging.getLogger(__name__)
@@ -71,10 +71,13 @@ class MascotEngine(QObject):
         except Exception as exc:   # noqa: BLE001 - never let a bad pack kill the app
             logger.warning("Mascot engine failed to load pack; disabled: %s", exc)
             self.core = None
+        if self.core is not None:
+            self._install_hide_walk()
 
         self._pixmap_cache: dict[str, QPixmap] = {}
         self._cursor = None
         self._dragging = False
+        self._hide_walking = False
         self._rendered_frame = False
 
         self._timer = QTimer(self)
@@ -133,6 +136,39 @@ class MascotEngine(QObject):
         self._dragging = dragging
         if self.core:
             self.core.state.dragging = dragging
+
+    def set_hide_walk(self, active: bool, moving_right: bool = True):
+        """Enter/leave the hide/show walk: the engine animates the walk frames in place
+        while App owns the window position (see :meth:`sync_anchor` per step).
+
+        ``active=True`` keeps the tick timer running and forces the synthetic
+        ``HideWalk`` behavior (an in-place walk loop) so the pet visibly walks toward
+        the edge; ``position_changed`` is suppressed so the engine never fights App's
+        manual stepping. ``active=False`` stops the walk and leaves the timer state to
+        the caller (usually a subsequent :meth:`set_hidden`)."""
+        self._hide_walking = bool(active)
+        if not self.core:
+            return
+        self.core.state.looking_right = bool(moving_right)
+        if active:
+            if not self._timer.isActive():
+                self._timer.start()
+            self.core.force_behavior("HideWalk")
+
+    def _install_hide_walk(self):
+        """Register a hidden ``HideWalk`` behavior reusing the pack's ``Walk`` pose set
+        (shime1/2/3) but playing in place, so App can walk the pet off-screen."""
+        if self.core is None:
+            return
+        walk = self.core.actions.get("Walk")
+        anims = getattr(walk, "anims", None)
+        if not anims:
+            logger.warning("HideWalk unavailable: pack has no Walk animation")
+            return
+        act = InPlaceAction({}, self.core, list(anims))
+        node = BehaviorNode(name="HideWalk", action=act, frequency=0, hidden=True)
+        self.core.behavior_defs["HideWalk"] = BehaviorDef(
+            node=node, next_children=[], add_next=False)
 
     def set_hidden(self, hidden: bool):
         """Freeze the ambient engine while the pet is hidden off-screen.
@@ -217,8 +253,9 @@ class MascotEngine(QObject):
             self._cursor = (cx, cy)
             self.core.update_environment(cursor_pos=(cx, cy, dx, dy))
             self.core.tick()
-            # move the window to follow the core anchor (unless the user is dragging it)
-            if not self._dragging:
+            # move the window to follow the core anchor (unless the user is dragging it
+            # or App is walking the pet off-screen during hide/show)
+            if not self._dragging and not self._hide_walking:
                 st = self.core.state
                 x = int(st.anchor.x) - self._px // 2
                 y = int(st.anchor.y) - self._px
@@ -233,7 +270,11 @@ class MascotEngine(QObject):
         pm = self._load_pixmap(pose.image)
         if pm is None or self.core is None:
             return
-        if not self.core.state.looking_right:
+        # The pack's shime*.png are the LEFT-facing image (Shimeji-ee loads the file as the
+        # left image and mirrors it for the right — see ImagePairs.load). So we mirror when
+        # looking RIGHT; the old `if not looking_right` showed the left art while facing right
+        # and vice-versa, which made the walk look flipped.
+        if self.core.state.looking_right:
             pm = pm.transformed(QTransform().scale(-1, 1))
         pm = pm.scaled(self._px, self._px, Qt.AspectRatioMode.KeepAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)

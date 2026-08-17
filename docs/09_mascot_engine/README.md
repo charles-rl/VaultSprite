@@ -88,6 +88,17 @@ blocks each gated by a `Condition`; the first matching one plays. The pose list 
 (used only by the two Breed actions) are instead **repurposed as visual-only gags** (see §5) so
 every frame in the pack can render.
 
+> **Fidelity fixes (2026-08-17 feedback pass — see BUILD_NOTES §9):** three places the port
+> originally diverged from the reference and now matches it: (a) **`Animate`** runs its effective
+> animation **once** then ends (`Animate.hasNext()` = `getTime() < getAnimation().getDuration()`),
+> not forever — this is how the `Bouncing` splash releases; (b) **`Select`** picks the first
+> effective branch, runs it to completion, then **ends** (`ComplexAction.hasNext()` is false once
+> the current child's `hasNext()` is), it must not re-init a finished branch (that re-loop kept the
+> pet stuck on the landing bounce); (c) **`Dragged` sway** uses the reference damped oscillator
+> `footDx=(footDx+(cursorX-footX)*0.1)*0.8; footX+=footDx` exposed as `FootX`/`FootDX` so the lean
+> poses swing like a pendulum around a stopped cursor instead of holding one static lean. The pack
+> art is also the LEFT-facing image, so the UI mirrors when `looking_right`.
+
 ### Fall physics (`Fall.java`, per substep)
 ```
 vx -= vx*RegistanceX / sub        # default RegX=0.05, RegY=0.1, Gravity=2

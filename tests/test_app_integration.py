@@ -121,10 +121,15 @@ def test_hide_walks_off_screen_and_freezes_engine(qapp, tmp_path):
 
     app._begin_hide()
     assert app._hidden
-    assert app.mascot._timer.isActive() is False          # ambient engine frozen
+    # the engine stays alive during the walk so the pet visibly walks off-screen
+    assert app.mascot._timer.isActive() is True
+    assert app.mascot._hide_walking is True
+    assert app.mascot.core.state.queued_behavior == "HideWalk"  # walk frames queued
 
     _walk_until(app, lambda: not app.window.isVisible())
     assert not app.window.isVisible()                     # fully off-screen + hidden
+    assert app.mascot._timer.isActive() is False          # ambient engine now frozen
+    assert app.mascot._hide_walking is False
     app.shutdown()
 
 

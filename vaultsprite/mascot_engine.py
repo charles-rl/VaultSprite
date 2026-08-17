@@ -80,6 +80,8 @@ class MascotState:                   # per-mascot live state (subset of Shimeji-
     queued_behavior: str = ""
     was_on_ie: bool = False
     dead: bool = False
+    foot_x: Optional[float] = None    # pendulum oscillator (C++ Dragged) — None ⇒ anchor.x
+    foot_dx: float = 0.0
 
 
 class _BehaviorList:                 # children + condition groups (mirrors C++ `list`)
@@ -405,6 +407,55 @@ class StayAction(AnimationAction):   # loops its poses until external end
     pass
 
 
+class AnimateAction(AnimationAction):
+    """C++ ``Animate``: play the effective animation ONCE, then end.
+
+    The reference ``Animate.hasNext()`` is ``getTime() < getAnimation().getDuration()``,
+    so an ``Animate`` action finishes after a single cycle. Our generic ``AnimationAction``
+    looped forever instead — that's the reported "spams the shime18 water-bucket landing
+    animation and is stuck in an infinite loop": ``Bouncing`` is ``Type="Animate"`` and,
+    with no ``Duration``, never advanced to ``Stand``."""
+
+    def step(self) -> bool:
+        if not self.tick_ok():
+            return False
+        ok, queued = self._border_type_ok()
+        if not ok:
+            if queued:
+                self.st.queued_behavior = queued
+            return False
+        if not self._dragging_ok():
+            return False
+        anim = self._current_anim()
+        if anim is None or not anim.poses:
+            return False
+        if self.real_elapsed >= anim.total_duration:
+            return False                      # one cycle done → advance to the next action
+        self.core.set_active_frame(anim.get_pose(self.real_elapsed))
+        return True
+
+
+class InPlaceAction(AnimationAction):
+    """Plays an animation loop WITHOUT moving the anchor.
+
+    Used by the app-level hide/show walk: App owns the window position (stepping it
+    toward the screen edge) while this action keeps the walk frames animating in
+    place, so the pet visibly walks off-screen instead of sliding frozen."""
+
+    def step(self) -> bool:
+        if not self.tick_ok():
+            return False
+        anim = self._current_anim()
+        if anim is None or not anim.poses:
+            return False
+        pose = anim.get_pose(self.st.time - getattr(self, "_anim_t0", 0)) \
+            if hasattr(self, "_anim_t0") else anim.poses[0]
+        if not hasattr(self, "_anim_t0"):
+            self._anim_t0 = self.st.time
+        self.core.set_active_frame(pose)
+        return True
+
+
 class MoveAction(AnimationAction):   # Stay + TargetX/TargetY crossing (C++ `move::tick`)
     def step(self) -> bool:
         if not self.tick_ok():
@@ -522,6 +573,16 @@ class FallAction(AnimationAction):   # C++ `fall.cc` per-tick integration + IE s
                 st.anchor.y = ie.top                        # ...top edge (window-top landing)
             elif before.y > ie.bottom and st.anchor.y <= ie.bottom and x_in_range:
                 st.anchor.y = ie.bottom                     # ...bottom edge
+
+        # Wall grip (C++ Fall.hasNext(): the fall ENDS when the mascot reaches a wall,
+        # leaving it ON the wall so the Fall's GrabWall branch — and the ambient wall
+        # pool — runs. This is how a sideways throw "grabs" a wall/ceiling instead of
+        # sliding down to the floor.) The work-area clamp above already pins the anchor to
+        # a side wall, so the 1px border check never skips even at high velocity.
+        a = st.anchor
+        if (env.work_area.left_border().is_on(a) or env.work_area.right_border().is_on(a)
+                or (ie.visible and (ie.left_border().is_on(a) or ie.right_border().is_on(a)))):
+            return False
 
         anim = self._current_anim()
         if anim is not None:
@@ -710,10 +771,19 @@ class SelectAction(SequenceAction):
                 self._start(self._idx)
         if not (0 <= self._idx < len(self.children)):
             return True                    # no branch matches yet → keep waiting
-        child = self._child()
-        if child is None:
-            return True                    # branch not ready → keep alive
-        return child.subtick(0)
+        child = self.children[self._idx]
+        if not child.active:
+            return False                   # selected branch finished → Select is done
+        ok = child.subtick(0)
+        if self.st.queued_behavior:
+            return False                   # pre-empted by an external force
+        if not ok:
+            # The selected branch finished — end the Select (C++ ComplexAction.hasNext()
+            # is false once the current child's hasNext() is false). Do NOT re-init it:
+            # re-initing the finished branch here is what kept the pet looping
+            # Bouncing/Stand/Fall forever instead of returning to ambient behavior.
+            return False
+        return True
 
 
 class ReferenceAction(Action):       # <ActionReference Name=... TargetX=.../> indirection
@@ -944,7 +1014,8 @@ class MascotCore:
                 act = InstantAction(attrs, self); act.kind = "look"; return act
             if action_type in anim_action_types:
                 cls = {"Stay": StayAction, "Move": MoveAction, "Jump": JumpAction,
-                       "Fall": FallAction}.get(action_type, AnimationAction)
+                       "Fall": FallAction, "Animate": AnimateAction}.get(
+                           action_type, AnimationAction)
                 if action_type == "Dragged" or action_type == "Regist":
                     # while dragged the UI pins the anchor; pose set animates in place
                     return _DraggableAction(attrs, self, anims)
@@ -1294,21 +1365,32 @@ class _NoOpInline(Action):
 
 
 class _DraggableAction(AnimationAction):   # Dragged / Regist pose sets (in-place while held)
+    def init(self, ctx: ActionCtx):
+        super().init(ctx)
+        st = self.core.state
+        st.foot_x = self.env.cursor.x        # pendulum starts on the cursor (C++ Dragged.init)
+        st.foot_dx = 0.0
+
     def step(self) -> bool:
         if not self.tick_ok():
             return False
-        # `_current_anim()` already picks the AnimList whose #{Condition} holds (C++ Pinched picks
+        # Pendulum (C++ Dragged): footDx = (footDx + (cursorX - footX)*0.1)*0.8 — a damped
+        # oscillator that keeps FootX swinging back and forth around the cursor even after it
+        # stops moving. The Pinched lean conditions (FootX < cursor.x - N) then alternate, so
+        # the pet visibly sways like a pendulum instead of holding one lean pose.
+        st = self.st
+        base = st.foot_x if st.foot_x is not None else self.env.cursor.x
+        st.foot_dx = (st.foot_dx + (self.env.cursor.x - base) * 0.1) * 0.8
+        st.foot_x = base + st.foot_dx
+        # `_current_anim()` picks the AnimList whose #{Condition} holds (C++ Pinched picks
         # the pose by FootX-vs-cursor distance); play its pose in place — x follows the cursor (UI).
         anim = self._current_anim()
         if anim is None or not anim.poses:
             return False
-        if not self.st.dragging:      # released mid-Dragged behavior → physics via Thrown/Fall
+        if not st.dragging:           # released mid-Dragged behavior → physics via Thrown/Fall
             return False
-        pose = anim.get_pose(self.st.time - getattr(self, "_anim_t0", 0)) \
-            if hasattr(self, "_anim_t0") else anim.poses[0]
-        if not hasattr(self, "_anim_t0"):
-            self._anim_t0 = self.st.time
-        self.st.anchor.y += pose.velocity.y      # vertical component only; x follows the cursor (UI)
+        pose = anim.get_pose(self.real_elapsed)
+        st.anchor.y += pose.velocity.y        # vertical component only; x follows the cursor (UI)
         self.core.set_active_frame(pose)
         return True
 

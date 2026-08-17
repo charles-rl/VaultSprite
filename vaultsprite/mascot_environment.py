@@ -354,7 +354,13 @@ class JSMascot(_View):
 
     @property
     def FootX(self):                   # noqa: N802 (Shimeji Dragged/Pinched condition var)
-        return float(getattr(self._state(), "anchor", Vec2()).x)
+        st = self._state()
+        foot = getattr(st, "foot_x", None)
+        return float(foot if foot is not None else getattr(st, "anchor", Vec2()).x)
+
+    @property
+    def FootDX(self):                  # noqa: N802 (pendulum oscillator, C++ Dragged)
+        return float(getattr(self._state(), "foot_dx", 0.0))
 
     @property
     def totalCount(self):              # noqa: N802
@@ -390,7 +396,8 @@ class ScopedMascotView(JSMascot):
     @property
     def FootX(self):                              # noqa: N802 (Shimeji Dragged condition var)
         st = self._state()                        # type: ignore[attr-defined]
-        return float(getattr(st, "anchor", Vec2()).x)
+        foot = getattr(st, "foot_x", None)
+        return float(foot if foot is not None else getattr(st, "anchor", Vec2()).x)
 
 
 # --------------------------------------------------------------------------- evaluator -

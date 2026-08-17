@@ -240,13 +240,17 @@ class TelemetryOverlay(QWidget):
                             | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Padding lives on the label (not the widget + layout), so the text sits flush
+        # against the rounded box's top-left instead of being double-inset / misaligned
+        # ("debug in the top left is not aligned to the box it is in").
         self.setStyleSheet(
             "background: rgba(20,20,30,200); color: #dfe6ff;"
-            "font: 10px monospace; border-radius:6px; padding:4px;")
+            "font: 10px monospace; border-radius:6px;")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setContentsMargins(0, 0, 0, 0)
         self._label = QLabel("mascot telemetry: n/a")
         self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._label.setStyleSheet("padding: 8px;")
         lay.addWidget(self._label)
         self.setFixedSize(260, 84)
         self._timer = QTimer(self)
@@ -565,8 +569,56 @@ class PetOverlayWindow(QWidget):
         return QRectF(g.x(), g.y(), g.width(), g.height())
 
     def show_bubble(self, text: str, duration_ms: int = 5000):
-        self.bubble.position_above(self.rect_f())
+        # Size the bubble first (show_text sets the widget size), THEN position it.
+        # The old order called position_above() before the bubble had dimensions, so
+        # width()/height() were 0/stale and the bubble landed at the window's center
+        # (reported as "chatbox defaults to the dead center of my screen").
         self.bubble.show_text(text, duration_ms)
+        self.bubble.position_above(self._sprite_visual_rect())
+
+    def _sprite_visual_rect(self) -> QRectF:
+        """Global rect of the sprite's opaque pixels, for bubble anchoring.
+
+        The pet image carries transparent padding and a bottom feet-anchor, so the
+        raw window rect over-estimates where the visible sprite is. Hovering the
+        bubble over the opaque bounds (its actual head) keeps it glued to the pet
+        across poses and scales instead of drifting toward the window top/center."""
+        pm = self.pet_label.pixmap()
+        if pm is None or pm.isNull():
+            return self.rect_f()
+        img = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        w, h = img.width(), img.height()
+        if w <= 0 or h <= 0:
+            return self.rect_f()
+        bits = bytes(img.bits())
+        bpl = img.bytesPerLine()
+        left = right = top = bottom = None
+        for y in range(h):
+            row = bits[y * bpl:(y + 1) * bpl]
+            for x in range(w):
+                if row[x * 4 + 3] > 8:      # non-transparent pixel (premultiplied alpha)
+                    if left is None or x < left:
+                        left = x
+                    if right is None or x > right:
+                        right = x
+                    if top is None:
+                        top = y
+                    bottom = y
+        if left is None:
+            return self.rect_f()
+        label = self.pet_label
+        disp = pm.size().scaled(label.width(), label.height(),
+                                Qt.AspectRatioMode.KeepAspectRatio)
+        sx = disp.width() / float(w)
+        sy = disp.height() / float(h)
+        ox = (label.width() - disp.width()) // 2
+        oy = (label.height() - disp.height()) // 2
+        g = label.mapToGlobal(QPoint(0, 0))
+        x0 = g.x() + ox + int(left * sx)
+        y0 = g.y() + oy + int(top * sy)
+        x1 = g.x() + ox + int(right * sx)
+        y1 = g.y() + oy + int(bottom * sy)
+        return QRectF(x0, y0, x1 - x0, y1 - y0)
 
     # -- walking movement (per-frame dx from the FSM config) ---------------------------------
     _walk_dir = 1   # ±1; flipped at screen walls so the pet turns around
