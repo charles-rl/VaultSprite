@@ -92,6 +92,13 @@ class App(QObject):
         self.agent.error.connect(
             lambda m: logger.info("vision note: %s", (m or "")[:120]))
 
+        # --- vault storage watchdog (M7; warn, never crash on a full disk) ---------
+        self.vault.vault_size_warning.connect(self._on_vault_size_warning)
+        size_ms = int(self.config.get("obsidian.size_check_ms", 300000))
+        self._size_timer = QTimer(self)
+        self._size_timer.setInterval(size_ms)
+        self._size_timer.timeout.connect(lambda: self.vault.check_storage())
+
         # --- autonomous vision loop (config-gated; 0 disables) --------------------
         ask_ms = int(self.config.get("remote.ask_interval_ms", 0))
         self._vision_timer = QTimer(self)
@@ -118,9 +125,22 @@ class App(QObject):
             reason = "disabled in config" if ask_ms <= 0 else "LLM client unavailable"
             logger.info("autonomous vision loop off (%s)", reason)
 
+        size_ms = int(self.config.get("obsidian.size_check_ms", 300000))
+        if size_ms > 0:
+            self._size_timer.start()
+            first = self.vault.check_storage()       # immediate baseline audit
+            logger.info("vault storage watchdog on (limit %s MB, %.1f KB used)",
+                        float(self.config.get("obsidian.max_size_mb", 50) or 0),
+                        first / 1024)
+
+    def _on_vault_size_warning(self, size_bytes: float):
+        logger.warning(
+            "VAULT SIZE LIMIT EXCEEDED: %.1f MB in %s — prune journal/events; pet keeps running",
+            size_bytes / 1048576, self.vault.root)
+
     def shutdown(self):
-        for stopper in (self._vision_timer.stop, self.physics.stop, self.stats.stop,
-                        self.context.stop, self.health.stop):
+        for stopper in (self._size_timer.stop, self._vision_timer.stop, self.physics.stop,
+                        self.stats.stop, self.context.stop, self.health.stop):
             try:
                 stopper()
             except Exception as exc:  # pragma: no cover - teardown best-effort

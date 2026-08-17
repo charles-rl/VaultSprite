@@ -66,6 +66,8 @@ obsidian:
   facts_dir: Memory/Facts
   journal_dir: Journal
   date_timezone: utc         # journal/event day bucketing (utc | local)
+  max_size_mb: 50            # storage limit; vault_size_warning fires when exceeded (<=0 disables monitoring)
+  size_check_ms: 300000      # periodic folder-size tick in App (also checked after every write); 0 disables the timer
 
 health:
   work_threshold_min: 50     # continuous WORK minutes before a stretch nudge (outline: 45-60)

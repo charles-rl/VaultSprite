@@ -7,9 +7,10 @@ while implementing. Read this before touching code — several items here only m
 sense because of PySide6 6.11 build quirks found empirically on this box.
 
 Built: Python 3.13 (uv), Linux dev box, offscreen Qt validation. Target: Windows 11.
-Status at time of writing: **74 tests passing, `--smoke` exit 0, render check PASS.**
-(2026-08-17 maintenance pass added the two M4 airborne-clamp tests; see §9.)
-Nothing is committed yet — the entire tree is untracked in git (greenfield repo).
+Status at time of writing: **91 tests passing, `--smoke` exit 0, render check PASS.**
+(2026-08-17 P1 hardening pass added vault sandboxing/size-watcher/concurrency + the standalone
+`tests/test_vault_and_ai.py` runner; see §9. The earlier maintenance pass added the two M4
+airborne-clamp tests.) Nothing is committed yet — the entire tree is untracked in git (greenfield repo).
 
 ---
 
@@ -28,7 +29,7 @@ vaultsprite/
   terrain_physics.py      M4: TerrainPhysics(QObject) floor query + fall sim, win32 guarded
   context_detector.py     M5: ContextDetector(QObject) poller thread, pywinctl guarded
   remote_agent.py         M6: RemoteAgent(QObject) mss capture → openai-in-QThread dispatch
-  obsidian_vault.py       M7: ObsidianVault — pure file I/O, atomic dot-temp writes
+  obsidian_vault.py       M7: ObsidianVault(QObject) — sandboxed atomic dot-temp writes, size watcher
   health_audio.py         M8: SoundBank (pygame no-op fallback) + WorkTimer(QObject)
   main.py                 App class = the SINGLE FSM owner; assembles/wires all 8 modules
 config/… assets/config.yaml is separate:
@@ -41,7 +42,8 @@ tools/generate_assets.py  deterministic-ish asset generator (RNG seed 42 for dra
 tools/render_check.py     offscreen boot → composites live frame, asserts transparency by
                           checking corners stay pure magenta, pixel-diffs two captures ~1.4 s
                           apart to prove QMovie is advancing; writes /tmp/vaultsprite_render.png
-tests/                    74 tests, all offscreen-safe (conftest: qapp fixture + FakeConfig)
+tests/                    91 tests, all offscreen-safe (conftest: qapp fixture + FakeConfig); plus
+                           tests/test_vault_and_ai.py — a standalone direct-run runner for the P1 pass
 ```
 
 Run commands (see AGENTS.md for the canonical list): `uv run vaultsprite`,
@@ -247,9 +249,34 @@ no-op on Windows (guarded by `os.name != "nt"`).
   category/key — API callers use natural language keys, files stay Obsidian-friendly.
 - **`append_journal` is a read-modify-atomic-write, not mode "a"** (full atomicity everywhere; the
   doc allows plain append but RMW costs nothing at journal volume). First write creates the file
-  with `{type: journal, date}` frontmatter + `# <day>` heading. Entries are `- [HH:MM] text` lines
-  in local time.
+  with `{type: journal, date, tags: [desktop-pet, journal]}` frontmatter + `# <day>` heading.
+  Entries are `- [HH:MM] text` lines in local time. An existing day file missing `tags` gets them
+  backfilled on its next append (`setdefault`, so custom edits to other keys survive).
 - Day bucketing timezone comes from `obsidian.date_timezone` (default `utc`; `local` uses system tz).
+- **P1 hardening (2026-08-17):** the class is now a `QObject` — see below.
+  - *Write sandboxing:* every public write (`write_fact`/`record_event`/`append_journal`) runs its
+    target through `_resolve_safe()` — `os.path.realpath()` on both sides, then equality or
+    `startswith(allowed_base + os.sep)` (the bare-`startswith` from the spec sketch would let a
+    sibling dir like `<root>-evil/` pass). Violation → `PermissionError("WRITE DENIED: …")`, raised
+    before any `mkdir`. Read-only access elsewhere is unaffected by design. The guard is on the
+    *public* API, not `_atomic_write` (tests legitimately use `_atomic_write` to seed fixtures).
+  - *Storage watcher:* `storage_size_bytes()` walks the vault root; `check_storage()` compares it
+    against `obsidian.max_size_mb` (default 50; `<= 0` disables) and emits edge-triggered
+    `vault_size_warning(bytes)` + a log line once per exceed episode — latched like StatEngine's
+    hysteresis, re-armed only after usage drops under the limit. Runs at the end of every public
+    write **and** on App's periodic tick (`obsidian.size_check_ms`, default 300000; App connects the
+    signal to a loud log). Monitoring never raises — a full disk must not crash the pet.
+  - *Fact updates are in-place and non-destructive:* `write_fact` re-reads the existing note, keeps
+    `recorded_at`, preserves earlier caller meta (e.g. `confidence`) unless overridden, stamps
+    `last_updated`, and only regenerates the body when it still matches the old template line — a
+    human-edited body survives machine updates verbatim. New templated body: `{cat} — {key}: {value}`.
+  - *Concurrency:* one module-wide `threading.RLock` wraps each public method's read-modify-write,
+    so parallel callers can't lose journal lines (atomic rename already prevented torn reads; the
+    lock fixes lost updates). Process-level only — VaultSprite is a single instance and takes no
+    cross-process file locks.
+- **M6 note:** `RemoteAgent`'s text fallback was exercised live against this box's Ollama (see §9):
+  with the config model loaded, `/api/chat` vision replies describe probe images correctly; on any
+  error path `build_messages()` degrades to a plain-string user message carrying window/OCR metadata.
 
 ### M8 health_audio
 - **`health.tick_work_seconds` is a test knob**: work-time credited per tick; default null → real
@@ -301,7 +328,14 @@ no-op on Windows (guarded by `os.name != "nt"`).
   to the widget's current geometry; once you move the window mid-drag your math drifts. Hand-built
   events with explicit globals (`tests/test_ui_overlay.py::_evt`) are deterministic — prefer those.
 
-## 6. Testing notes (how the 72 tests work, and how to extend them)
+## 6. Testing notes (how the 91 tests work, and how to extend them)
+
+- `tests/test_vault_and_ai.py` is **direct-run only** (`uv run python tests/test_vault_and_ai.py`;
+  env: `OLLAMA_BASE_URL`, `VISION_PROBE_TIMEOUT_S`). pytest collects it by name — so it must create
+  NO Qt object at import time (a module-level `QCoreApplication` clobbers conftest's session app and
+  aborts Qt; the QObject host is built lazily inside `main()`). Its Ollama section talks to a real
+  server with a 300 s default read timeout (first inference loads the model); probe PNG lands at
+  `/tmp/vaultsprite_vision_probe.png` for visual cross-checking of the reply.
 
 - `tests/conftest.py`: session-scoped offscreen `QApplication`; `FakeConfig` flattens
   **the real** `config/config.yaml` into dotted keys and accepts dotted-string overrides — so a new
@@ -333,6 +367,37 @@ no-op on Windows (guarded by `os.name != "nt"`).
   `/tmp/vaultsprite_render.png`; no helper scripts or remote-VLM round trips needed for image checks.
 
 ## 9. Changelog
+
+### 2026-08-17 — P1 hardening pass: vault sandboxing, storage watcher, vision verification
+1. **Write isolation lock** (§3-M7): `ObsidianVault._resolve_safe()` gates all three public write
+   APIs on `os.path.realpath` containment within the vault root (with the sibling-prefix fix the
+   spec sketch was missing); escape → `PermissionError("WRITE DENIED: …")` before any filesystem
+   mutation. Reads elsewhere stay allowed by contract. The guard deliberately lives on the public
+   API, not `_atomic_write`, so test fixtures can seed files directly.
+2. **Storage watcher** (§3-M7): `ObsidianVault` is now a `QObject` with edge-triggered
+   `vault_size_warning(bytes)`; `check_storage()` runs after every write + on App's new periodic
+   tick (`obsidian.size_check_ms: 300000`, started/baselined in `App.start()`, logged via
+   `_on_vault_size_warning`). Config gained `obsidian.max_size_mb: 50` (≤0 disables) and the tick key.
+   Latch/re-arm semantics mirror StatEngine hysteresis; monitoring never raises.
+3. **Frontmatter contract fixes** (§3-M7): new journal files carry `tags: [desktop-pet, journal]`
+   (+ backfill via `setdefault` on legacy day files); `write_fact` updates are non-destructive —
+   stable `recorded_at`, preserved prior meta (e.g. `confidence`) unless overridden, fresh
+   `last_updated`, hand-edited bodies left verbatim.
+4. **Concurrency lock** (§3-M7): module RLock over all read-modify-write sections; 19-thread pool
+   tests prove zero lost/duplicated journal lines and no torn frontmatter (atomic rename was already
+   tearing-proof; the lock closes lost updates). Process-level only, documented as such.
+5. **`tests/test_vault_and_ai.py`** — standalone runner (`uv run python tests/test_vault_and_ai.py`,
+   exit 0/1 + status report over Sandboxing / Size monitoring / Vault I/O / Ollama+Vision):
+   sandbox escape vectors incl. symlink-out-of-root and tampered-`facts_dir` end-to-end; exact-byte
+   threshold trip with latch + re-arm phases; journal/fact/concurrency end-to-end in temp roots;
+   model discovery via `/api/tags` (CLI `ollama ls` fallback), stored in the runtime context, then a
+   native `/api/chat` base64-PNG probe with graceful text-only/unreachable handling that verifies
+   RemoteAgent's plain-text metadata fallback. **Live result this pass:** detected
+   `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL` (caps `completion,vision`) via `/api/tags`; probe PNG
+   (red circle / blue triangle / green square on white — visually inspected before and after) was
+   described correctly in ~9 s; the reply matched direct inspection exactly.
+6. **Test-suite note** (§6): pytest imports that file by name at collection time, so it must stay
+   free of module-level Qt objects (lazy host inside `main()`).
 
 ### 2026-08-17 — user-feedback maintenance pass (commit after `7d35f4e`)
 Addressed the report in `USER_NOTES.md` (then rewritten as a resolution log):

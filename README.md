@@ -23,7 +23,8 @@ Optional, do later when you want:
 
 ```bash
 uv sync --extra dev                          # + test deps
-QT_QPA_PLATFORM=offscreen uv run pytest      # 72 tests, no display needed
+QT_QPA_PLATFORM=offscreen uv run pytest      # 91 tests, no display needed
+uv run python tests/test_vault_and_ai.py     # P1 runner: sandboxing / size watch / vault I/O / Ollama vision probe (live)
 uv run vaultsprite --smoke                   # ~1.5 s boot check, exits 0/1
 ```
 
@@ -47,7 +48,7 @@ On Windows every capability is real (taskbar physics, window-standing falls, con
 - **Needs** (`stat_engine.py`) — Hunger/Energy decay and Boredom climbs once per minute while you're in a WORK context. Crossing critical levels makes the pet complain (speech bubble) and write it to your vault.
 - **Context** (`context_detector.py`) — polls the foreground window title every 5 s, keyword-classifies WORK vs PLAY; gates stat decay and the health timer, resets work-time when you switch to play.
 - **Vision** (`remote_agent.py`) — downscaled screenshot (~1024×768 JPEG) + prompt dispatched asynchronously (sync `openai` SDK in a worker QThread) to your remote Ollama; the reply appears in a speech bubble and is journaled. An autonomous loop asks "what am I doing?" every 5 min when enabled (`remote.ask_interval_ms`).
-- **Memory** (`obsidian_vault.py`) — atomic Markdown with YAML frontmatter: facts under `Memory/Facts/`, events under `Memory/Events/YYYY-MM-DD/`, daily journal at `Journal/YYYY-MM-DD.md`. No Obsidian plugin required; point `obsidian.vault_root` (or `VAULT_ROOT`) at any vault folder.
+- **Memory** (`obsidian_vault.py`) — atomic Markdown with YAML frontmatter: facts under `Memory/Facts/`, events under `Memory/Events/YYYY-MM-DD/`, daily journal at `Journal/YYYY-MM-DD.md`. No Obsidian plugin required; point `obsidian.vault_root` (or `VAULT_ROOT`) at any vault folder. All writes are hard-sandboxed inside that folder (`PermissionError` on escape), and a storage watcher warns when the vault exceeds `obsidian.max_size_mb` (default 50 MB).
 - **Health & sound** (`health_audio.py`) — after 45–60 min of continuous work the pet forces a stretch pose, chirps, and asks you to move; preloaded 8-bit SFX play non-blocking via pygame (no-op where no audio device exists).
 
 ## Useful commands (optional, for later)

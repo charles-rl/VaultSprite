@@ -9,17 +9,37 @@ Fixed paths under the (configurable) vault root::
     Memory/Facts/{category}/{key}.md     mutable typed facts   (write_fact)
     Memory/Events/YYYY-MM-DD/{id}.md     append-only events    (record_event)
     Journal/YYYY-MM-DD.md                daily journal         (append_journal)
+
+Safety contracts (P1 hardening):
+- **Write sandboxing**: every public write resolves its target against the vault
+  root and raises ``PermissionError("WRITE DENIED: ...")`` for anything outside
+  it (symlinks included, via ``os.path.realpath``). Read access elsewhere on the
+  system is unaffected — only writes are hard-locked to this folder.
+- **Storage watching**: ``check_storage()`` sizes the whole vault folder after
+  every write (App also ticks it periodically) and emits edge-triggered
+  ``vault_size_warning(bytes)`` when ``obsidian.max_size_mb`` is exceeded;
+  monitoring never raises, so a full disk can't crash the pet.
+- **Concurrency**: all read-modify-write sections run under one RLock, so
+  parallel callers cannot lose journal lines (the atomic rename already prevents
+  torn reads; the lock fixes lost updates). Process-level only — VaultSprite is
+  a single app instance and takes no cross-process file locks.
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Union
 
 import yaml
+from PySide6.QtCore import QObject, Signal
 
 from .config import Config, load_config
+
+logger = logging.getLogger(__name__)
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 
@@ -29,10 +49,21 @@ def _slugify(text: str) -> str:
     return slug[:48] or "item"
 
 
-class ObsidianVault:
-    """Filesystem-only vault writer/reader."""
+def _fact_body(category: str, key: str, value: Any) -> str:
+    """Canonical one-line body for a machine-managed fact note."""
+    return f"{category} — {key}: {value}"
+
+
+JOURNAL_TAGS = ["desktop-pet", "journal"]
+
+
+class ObsidianVault(QObject):
+    """Filesystem-only vault writer/reader; all writes sandboxed to the root."""
+
+    vault_size_warning = Signal(float)   # current folder size in bytes, edge-triggered
 
     def __init__(self, config: Union[Config, None] = None):
+        super().__init__()
         self.config = config or load_config()
         root = Path(self.config.get("obsidian.vault_root", "Vault"))
         if not root.is_absolute():
@@ -47,6 +78,62 @@ class ObsidianVault:
         self.journal_dir = self.root / str(
             self.config.get("obsidian.journal_dir", "Journal")
         )
+
+        # storage watcher state: None limit (max_size_mb <= 0) disables monitoring
+        max_mb = float(self.config.get("obsidian.max_size_mb", 50) or 0)
+        self.size_limit_bytes: Union[int, None] = \
+            int(max_mb * 1024 * 1024) if max_mb > 0 else None
+        self._size_warned_over = False
+        # single writer lock across read-modify-write sections (P1 concurrency fix)
+        self._lock = threading.RLock()
+
+    # -- write sandboxing guard (P1: absolute write prohibition outside root) ----
+    def _resolve_safe(self, file_path: Union[str, Path]) -> Path:
+        """Resolve *file_path* to its real path and refuse anything outside the vault.
+
+        Raises ``PermissionError`` when the resolved target escapes the vault
+        root — including through symlinks or sibling directories that merely
+        share the root's name prefix (hence ``startswith(base + os.sep)``)."""
+        target_path = os.path.realpath(file_path)
+        allowed_base = os.path.realpath(str(self.root))
+        if not (target_path == allowed_base or target_path.startswith(allowed_base + os.sep)):
+            raise PermissionError(
+                f"WRITE DENIED: Path {target_path} is outside "
+                f"allowed vault directory {allowed_base}")
+        return Path(target_path)
+
+    # -- storage size watcher -----------------------------------------------------
+    def storage_size_bytes(self) -> int:
+        """Total on-disk bytes in the vault folder (best-effort; never raises)."""
+        total = 0
+        for dirpath, _dirnames, filenames in os.walk(str(self.root)):
+            for name in filenames:          # vanished mid-walk → skipped via OSError guard
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    pass
+        return total
+
+    def check_storage(self) -> int:
+        """Size the vault folder and warn when over ``obsidian.max_size_mb``.
+
+        Edge-triggered (mirrors StatEngine hysteresis): one log line + signal per
+        exceed episode, re-armed only after usage drops back under the limit.
+        Returns the current size in bytes; monitoring never raises."""
+        current = self.storage_size_bytes()
+        if not (self.size_limit_bytes and current > self.size_limit_bytes):
+            self._size_warned_over = False     # healthy again → re-arm the trip wire
+            return current
+        if not self._size_warned_over:
+            self._size_warned_over = True
+            logger.warning(
+                "vault storage warning: %.1f MB used, limit %.2f MB (%s)",
+                current / 1048576, (self.size_limit_bytes or 0) / 1048576, self.root)
+            try:
+                self.vault_size_warning.emit(current)
+            except RuntimeError as exc:        # teardown race: QObject already gone
+                logger.debug("vault_size_warning emit failed: %s", exc)
+        return current
 
     # -- atomic I/O primitives (SPEC-v4 canonical helpers) --------------------
     @staticmethod
@@ -87,22 +174,46 @@ class ObsidianVault:
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    # -- public API ------------------------------------------------------------
+    # -- public API (all writes: locked → guarded → atomic → size-checked) ----
     def write_fact(self, category: str, key: str, value: Any, **meta: Any) -> Path:
-        """Create/overwrite ``Memory/Facts/{category}/{key}.md`` (atomic)."""
-        path = self.facts_dir / _slugify(category) / f"{_slugify(key)}.md"
-        frontmatter: dict[str, Any] = {
-            "type": "fact",
-            "entity": category,
-            "predicate": key,
-            "value": value,
-            "recorded_at": self._now_iso(),
-        }
-        frontmatter.update(meta)
-        body = f"{category} — {key}: {value}" if not isinstance(value, str) else \
-               f"{category} — {key}: {value}"
-        self._atomic_write(path, frontmatter, body)
-        return path
+        """Create/update ``Memory/Facts/{category}/{key}.md`` (atomic, sandboxed).
+
+        Frontmatter updates in place on subsequent calls: ``value`` and
+        ``last_updated`` change each time; the original ``recorded_at`` and any
+        earlier caller metadata (e.g. ``confidence``) are preserved unless a new
+        kwarg overrides them. A hand-authored body (anything other than the
+        generated template line) is left untouched by machine updates."""
+        with self._lock:
+            path = self.facts_dir / _slugify(category) / f"{_slugify(key)}.md"
+            target = self._resolve_safe(path)        # may raise PermissionError
+            prior_fm, prior_body = \
+                (self._read_markdown(target) if target.exists() else ({}, ""))
+            now = self._now_iso()
+
+            frontmatter: dict[str, Any] = {
+                "type": "fact",
+                "entity": category,
+                "predicate": key,
+                "value": value,
+                "recorded_at": prior_fm.get("recorded_at") or now,   # stable across updates
+            }
+            preserved = {k: v for k, v in prior_fm.items() if k not in (
+                "type", "entity", "predicate", "value", "recorded_at", "last_updated")}
+            frontmatter.update({k: v for k, v in preserved.items() if k not in meta})
+            frontmatter["last_updated"] = now
+            frontmatter.update(meta)                 # explicit new kwargs win
+
+            prior_body_stripped = prior_body.strip()
+            old_template = _fact_body(category, key, prior_fm.get("value")) if prior_fm else None
+            if old_template is not None and prior_body_stripped \
+                    and prior_body_stripped != old_template:
+                body = prior_body_stripped           # custom content → keep verbatim
+            else:
+                body = _fact_body(category, key, value)   # templated → track the new value
+
+            self._atomic_write(target, frontmatter, body)
+        self.check_storage()                          # post-write size audit (never raises)
+        return target
 
     def read_fact(self, category: str, key: str) -> tuple[dict[str, Any], str]:
         path = self.facts_dir / _slugify(category) / f"{_slugify(key)}.md"
@@ -110,36 +221,43 @@ class ObsidianVault:
 
     def record_event(self, summary: str, **details: Any) -> Path:
         """Append-only episodic event under ``Memory/Events/YYYY-MM-DD/``."""
-        day = self._today()
-        slug = _slugify(summary)[:24]
-        stamp = datetime.now(timezone.utc).strftime("%H%M%S")
-        path = self.events_dir / day / f"event-{day}-{slug}-{stamp}.md"
-        body = details.pop("body", None) or summary
-        frontmatter: dict[str, Any] = {
-            "type": "event",
-            "id": f"event-{day}-{slug}",
-            "summary": summary,
-            "occurred_at": self._now_iso(),
-        }
-        frontmatter.update(details)
-        self._atomic_write(path, frontmatter, str(body))
-        return path
+        with self._lock:
+            day = self._today()
+            slug = _slugify(summary)[:24]
+            stamp = datetime.now(timezone.utc).strftime("%H%M%S")
+            path = self.events_dir / day / f"event-{day}-{slug}-{stamp}.md"
+            target = self._resolve_safe(path)         # may raise PermissionError
+            body = details.pop("body", None) or summary
+            frontmatter: dict[str, Any] = {
+                "type": "event",
+                "id": f"event-{day}-{slug}",
+                "summary": summary,
+                "occurred_at": self._now_iso(),
+            }
+            frontmatter.update(details)
+            self._atomic_write(target, frontmatter, str(body))
+        self.check_storage()                          # post-write size audit (never raises)
+        return target
 
     def append_journal(self, entry: str) -> Path:
         """Append a timestamped line to ``Journal/YYYY-MM-DD.md`` (atomic RMW)."""
-        day = self._today()
-        stamp = datetime.now().strftime("%H:%M")
-        line = f"- [{stamp}] {entry.strip()}"
-        path = self.journal_dir / f"{day}.md"
-        if path.exists():
-            frontmatter, body = self._read_markdown(path)
-            new_body = (body.rstrip("\n") + "\n" + line + "\n").strip() + "\n"
-            self._atomic_write(path, frontmatter or {"type": "journal", "date": day},
-                               new_body.strip())
-        else:
-            self._atomic_write(
-                path,
-                {"type": "journal", "date": day},
-                f"# {day}\n\n{line}\n",
-            )
-        return path
+        with self._lock:
+            day = self._today()
+            stamp = datetime.now().strftime("%H:%M")
+            line = f"- [{stamp}] {entry.strip()}"
+            path = self.journal_dir / f"{day}.md"
+            target = self._resolve_safe(path)         # may raise PermissionError
+            if target.exists():
+                frontmatter, body = self._read_markdown(target)
+                new_body = body.rstrip("\n") + "\n" + line
+                # keep existing frontmatter; backfill the contract tags on older files
+                frontmatter.setdefault("type", "journal")
+                frontmatter.setdefault("date", day)
+                frontmatter.setdefault("tags", list(JOURNAL_TAGS))
+            else:
+                frontmatter = {"type": "journal", "date": day,
+                               "tags": list(JOURNAL_TAGS)}
+                new_body = f"# {day}\n\n{line}"
+            self._atomic_write(target, frontmatter, new_body)
+        self.check_storage()                          # post-write size audit (never raises)
+        return target
