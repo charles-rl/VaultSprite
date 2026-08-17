@@ -98,14 +98,28 @@ class App(QObject):
             self.mascot.frame_changed.connect(self.window.render_mascot_frame)
             self.mascot.position_changed.connect(self.window.move_to)
             self.mascot.behavior_changed.connect(self._on_mascot_behavior)
-            self._setup_tray()
             if bool(self.config.get("debug.telemetry_overlay", False)):
                 self._overlay = TelemetryOverlay()
                 self._overlay.start(self._mascot_telemetry)
 
+        # The tray is the reveal path for a hidden pet, so it must exist whenever the
+        # hide feature is enabled — even in legacy (non-mascot) mode.
+        if bool(self.config.get("hide.enabled", True)) or self.mascot is not None:
+            self._setup_tray()
+
         self.agent.response_ready.connect(self._on_agent_reply)
         self.agent.error.connect(
             lambda m: logger.info("vision note: %s", (m or "")[:120]))
+
+        w.hide_requested.connect(self._on_hide_requested)
+
+        # --- hide/show behavior (walk to nearest edge, pause autonomy) -------------
+        self._hidden = False
+        self._hide_restore: Optional[tuple[int, int]] = None
+        self._hide_target: Optional[tuple[int, int]] = None
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setInterval(int(self.config.get("hide.step_ms", 20)))
+        self._hide_timer.timeout.connect(self._hide_walk_step)
 
         # --- vault storage watchdog (M7; warn, never crash on a full disk) ---------
         self.vault.vault_size_warning.connect(self._on_vault_size_warning)
@@ -174,8 +188,8 @@ class App(QObject):
                 tray.hide()
             except Exception:  # pragma: no cover
                 pass
-        for stopper in (self._size_timer.stop, self._vision_timer.stop, self.physics.stop,
-                        self.stats.stop, self.context.stop, self.health.stop):
+        for stopper in (self._size_timer.stop, self._vision_timer.stop, self._hide_timer.stop,
+                        self.physics.stop, self.stats.stop, self.context.stop, self.health.stop):
             try:
                 stopper()
             except Exception as exc:  # pragma: no cover - teardown best-effort
@@ -205,6 +219,8 @@ class App(QObject):
 
     def _advance_fsm(self, _finished_name: str = ""):
         """Current state's hold elapsed → draw the next weighted state."""
+        if self._hidden:
+            return
         t = self.fsm.get_next_state(self.window.player.current_state or None)
         self._play(t)
 
@@ -295,8 +311,8 @@ class App(QObject):
 
     # -- health nudge (M8 -> FSM + sound + bubble) ---------------------------------------
     def _trigger_stretch_nudge(self):
-        if self.window.dragging or self.physics.falling:
-            return     # defer if the pet is mid-air / held; re-arms next tick window
+        if self._hidden or self.window.dragging or self.physics.falling:
+            return     # defer if the pet is mid-air / held / hidden; re-arms next tick window
         if self.mascot is not None:
             self.mascot.force_behavior("SitDown")
         else:
@@ -336,7 +352,7 @@ class App(QObject):
         self.agent.ask(prompt, window_context=window_context)
 
     def _vision_tick(self):
-        if self.window.dragging or not self.agent.enabled:
+        if self._hidden or self.window.dragging or not self.agent.enabled:
             return
         prompt = ("Look at my screen and, in one short sentence, tell me what I appear "
                   "to be doing right now.")
@@ -366,11 +382,109 @@ class App(QObject):
 
     def _setup_tray(self):
         icon_path = str(Path(self.config.resolve_path("assets/steve_shimeji/img/icon.png")))
-        self._tray = SystemTray(icon_path, self.mascot.behavior_names)
+        names = self.mascot.behavior_names if self.mascot is not None else []
+        self._tray = SystemTray(icon_path, names)
         self._tray.scale_changed.connect(self._on_scale_changed)
         self._tray.behavior_toggled.connect(self._on_behavior_toggled)
+        self._tray.hide_toggled.connect(self._on_hide_toggled)
         self._tray.quit_requested.connect(self._on_quit_requested)
         self._tray.show()
+
+    # -- hide / show (walk to nearest edge, pause autonomy) ---------------------------
+    def _on_hide_requested(self):
+        """Sprite right-click 'Hide pet' → hide (the tray checkbox follows)."""
+        if not self._hidden and bool(self.config.get("hide.enabled", True)):
+            self._begin_hide()
+            tray = getattr(self, "_tray", None)
+            if tray is not None:
+                tray.set_hidden(True)
+
+    def _on_hide_toggled(self, want_hidden: bool):
+        if want_hidden and not self._hidden:
+            self._begin_hide()
+        elif not want_hidden and self._hidden:
+            self._begin_show()
+
+    def _hide_edge_target(self) -> tuple[int, int]:
+        """Fully-off-screen position at the nearest screen edge, keeping the sprite's y."""
+        screen = QApplication.primaryScreen()
+        w, h = self.window.size_px()
+        if screen is None:
+            x, y = self.window.position()
+            return x, y
+        geo = screen.availableGeometry()
+        wx, wy = self.window.position()
+        center = wx + w // 2
+        go_left = center < (geo.left() + geo.width() / 2)
+        if go_left:
+            target_x = geo.left() - w            # window fully off the left edge
+        else:
+            target_x = geo.right()               # window fully off the right edge
+        return target_x, wy
+
+    def _begin_hide(self):
+        if self._hidden:
+            return
+        self._hidden = True
+        self._hide_restore = self.window.position()
+        if self.mascot is not None:
+            self.mascot.set_hidden(True)         # freeze ambient engine
+        else:
+            self.physics.stop()                  # legacy mode: freeze movement
+            self.window.player.stop()
+        self.window.bubble.hide()                # no lingering bubble while away
+        self._hide_target = self._hide_edge_target()
+        self._debug_log("mascot", f"hide started from {self._hide_restore} -> target {self._hide_target}")
+        self._hide_timer.start()
+
+    def _begin_show(self):
+        if not self._hidden:
+            return
+        self._hidden = False
+        self.window.show()
+        self._hide_target = self._hide_restore   # return to the pre-hide spot
+        self._debug_log("mascot", f"show started, returning to {self._hide_target}")
+        self._hide_timer.start()
+
+    def _hide_walk_step(self):
+        """One step toward the hide/show target; the timer drives repeated steps."""
+        if self._hide_target is None:
+            self._hide_timer.stop()
+            return
+        x, y = self.window.position()
+        tx, ty = self._hide_target
+        step = int(self.config.get("hide.step_px", 6))
+        dx = tx - x
+        dy = ty - y
+        nx, ny = x, y
+        if abs(dx) <= step:
+            nx = tx
+        else:
+            nx = x + (step if dx > 0 else -step)
+        if abs(dy) <= step:
+            ny = ty
+        else:
+            ny = y + (step if dy > 0 else -step)
+        self.window.move_to(nx, ny)
+        if (nx, ny) == (tx, ty):
+            self._hide_timer.stop()
+            self._hide_target = None
+            self._hide_walk_done()
+
+    def _hide_walk_done(self):
+        """Reached the off-screen hide spot or the restore point."""
+        if self._hidden:
+            self.window.hide()                   # fully invisible
+            return
+        # back on screen: hand the anchor back to the engine and resume autonomy
+        if self.mascot is not None:
+            rx, ry = self._hide_restore or self.window.position()
+            self.mascot.sync_anchor(rx, ry)
+            self.mascot.set_hidden(False)
+        else:
+            self.physics.start()
+            t = self.fsm.force_state(self.fsm.current_state)
+            self.window.play_state(t)
 
     def _on_scale_changed(self, factor: float):
         w, h = self.window.size_px()
@@ -396,7 +510,7 @@ class App(QObject):
                 "frame": self.mascot.current_frame() if self.mascot else ""}
 
     def _say(self, text: str):
-        if not (self.window and self.window.isVisible()):
+        if self._hidden or not (self.window and self.window.isVisible()):
             return
         self.window.show_bubble(text)
 

@@ -43,7 +43,8 @@ On Windows every capability is real (taskbar physics, window-standing falls, con
 
 ## What it does, at a glance
 
-- **Overlay** (`ui_overlay.py`) — frameless, always-on-top, translucent window. Click = petting reaction; drag-and-release with speed = flick → the pet is thrown and falls under gravity onto the taskbar (or on top of visible windows, on Windows). Right-click menu: *Ask what I see*, *Stretch break*, *Quit*.
+- **Overlay** (`ui_overlay.py`) — frameless, always-on-top, translucent window. Click = petting reaction; drag-and-release with speed = flick → the pet is thrown and falls under gravity onto the taskbar (or on top of visible windows, on Windows). Right-click menu: *Ask what I see*, *Stretch break*, *Hide pet*, *Quit*.
+- **Hide** — toggle *Hide pet* in the system tray (or right-click the sprite). The pet walks to the nearest screen edge, slips fully off-screen, and pauses all autonomy (no bubbles, no ambient walking, no vision asks, no nudges) — handy for meetings. Unchecking the tray item walks it back to the exact spot it hid from and resumes. Config: `hide.*` in `config/config.yaml`.
 - **Brain** (`animation_fsm.py`) — weighted probabilistic state machine over `idle / walking / talking / sleeping` plus forced states `falling` and `stretch_nudge`. Pure Python; the overlay plays each state's animated GIF for its configured duration, then asks the FSM what's next.
 - **Needs** (`stat_engine.py`) — Hunger/Energy decay and Boredom climbs once per minute while you're in a WORK context. Crossing critical levels makes the pet complain (speech bubble) and write it to your vault.
 - **Context** (`context_detector.py`) — polls the foreground window title every 5 s, whole-word keyword classification into WORK vs PLAY; ~30 s in an unclassified app decays to UNKNOWN. Gates stat decay and the health timer (paused in PLAY *and* UNKNOWN), resets work-time when you switch away from work.

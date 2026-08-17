@@ -80,6 +80,11 @@ debug:                       # flip to false once troubleshooting is done (no co
   vault_logging: true        # rolling trail in <vault>/Memory/Debug/{pet-states,context}.md (title+bucket on change)
   telemetry_overlay: true    # live on-screen telemetry window (coords, behavior, frame index)
 
+hide:                        # "hide pet" — walk to the nearest edge, go fully off-screen, pause autonomy
+  enabled: true              # when on, the tray/sprite menu offers Hide/Show; reveal returns to the pre-hide spot
+  step_ms: 20                # walk-to-edge / walk-back step timer interval
+  step_px: 6                 # px moved per step (walk speed)
+
 mascot:                      # M9 behavior engine — plays assets/steve_shimeji directly (Shimeji XML)
   enabled: true              # when on, the Shimeji engine drives ambient animation + position; off = legacy GIF FSM
   actions_xml: assets/steve_shimeji/conf/actions.xml

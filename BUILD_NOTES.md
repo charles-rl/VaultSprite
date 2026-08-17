@@ -23,6 +23,7 @@ M4 settle-guarantee regression tests — see §9 top entry. The repo now has rea
 pyproject.toml            hatchling; PySide6/PyYAML/Pillow/mss/openai/httpx/pygame-ce;
                           pywin32+pywinctl behind sys_platform=="win32"; [tool.uv] package=true
 config/config.yaml        ALL app settings (dotted sections) — the single config source
+                          (incl. hide.* — see §9 Hide/Show entry)
 vaultsprite/
   config.py               load_config() → Config with .get('a.b'), .section(), env overrides,
                           path resolution vs repo root. Caches in _CACHED; pass reload=True.
@@ -83,6 +84,10 @@ PetOverlayWindow                        App                         modules
   clicked ────────────────────────────► energy +4, chirp blip
   ask_vision_requested(prompt) ───────► agent.ask(prompt, window_context=context_now)
   stretch_requested ──────────────────► _trigger_stretch_nudge
+  hide_requested ─────────────────────► _begin_hide (+ tray.set_hidden(True))
+
+SystemTray                                App
+  hide_toggled(bool) ─────────────────► _begin_hide / _begin_show (App owns the walk)
 
 SpritePlayer (lives on the window)       App
   state_finished(name) ───────────────► _advance_fsm → fsm.get_next_state → window.play_state(t)
@@ -477,6 +482,14 @@ no-op on Windows (guarded by `os.name != "nt"`).
   `/tmp/vaultsprite_render.png`; no helper scripts or remote-VLM round trips needed for image checks.
 
 ## 9. Changelog
+
+### 2026-08-17 — Hide/Show feature (walk to nearest edge, pause autonomy)
+1. **Config**: new `hide:` section — `enabled` (default true), `step_ms` (20), `step_px` (6).
+2. **Trigger/reveal**: checkable **"Hide pet"** in the system-tray menu (`hide_toggled` signal) + a right-click "Hide pet" item on the sprite (`hide_requested`). The tray is now created whenever `hide.enabled` OR mascot is on, so reveal always works (incl. legacy-GIF mode). `SystemTray.set_hidden()` syncs the checkbox when hide is triggered from the sprite menu.
+3. **App owns the walk** (§2 ownership rule): `_begin_hide()` records `_hide_restore = window.position()`, freezes the engine (`MascotEngine.set_hidden(True)` stops the tick timer; legacy mode stops physics+player), hides the bubble, and walks fully off the *nearest* screen edge (`_hide_edge_target`: right → `geo.right()`, left → `geo.left()-w`) via a repeating `_hide_timer` + `_hide_walk_step()` (directly testable, mirroring TerrainPhysics' manual-tick pattern). On arrival `window.hide()` (fully invisible). `_begin_show()` shows the window and walks back to the recorded pre-hide spot, then `sync_anchor` + `set_hidden(False)` hand the anchor back to the engine and resume autonomy (legacy: `physics.start()` + replay current FSM state).
+4. **Autonomy gates** (pause while hidden): `_say()`, `_vision_tick()`, `_trigger_stretch_nudge()`, `_advance_fsm()` all `if self._hidden: return`. No bubbles, no ambient motion, no vision asks, no nudges while away. `shutdown()` stops `_hide_timer`.
+5. **`MascotEngine.set_hidden()`** stops/restarts the tick timer; on unhide it runs the 6 warmup ticks WITHOUT re-seeding the anchor (unlike `start()`'s floor-center seeding) so the pet resumes where it returned to.
+6. **Tests** (`tests/test_app_integration.py`, suite 115 → **119**; `--smoke` exit 0): hides off-screen + freezes engine; hidden suppresses bubbles/nudges; reveal returns to pre-hide position + resumes engine; nearest-edge selection (left/right).
 
 ### 2026-08-17 — M9 completion pass: reference → DalekCraft2, engine bug-fixed, wired into App/UI
 1. **Reference re-pointed** from `pixelomer/Shijima-Qt`/`libshijima` (C++/GPL) to

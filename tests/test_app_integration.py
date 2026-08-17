@@ -100,3 +100,87 @@ def test_smoke_boot_exit_zero(qapp, tmp_path):
 
     code = main_mod.main(["--smoke"])                      # real config; ~1.5s run
     assert code == 0
+
+
+# -- hide / show (walk to nearest edge, pause autonomy) ---------------------------------
+def _walk_until(app, done, max_steps=400):
+    steps = 0
+    while not done() and steps < max_steps:
+        app._hide_walk_step()
+        steps += 1
+    assert steps < max_steps, "hide/show walk never reached its target"
+
+
+def test_hide_walks_off_screen_and_freezes_engine(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path, mascot=True))
+    app.start()
+    app.window.show()
+    before = app.window.position()
+
+    app._begin_hide()
+    assert app._hidden
+    assert app.mascot._timer.isActive() is False          # ambient engine frozen
+
+    _walk_until(app, lambda: not app.window.isVisible())
+    assert not app.window.isVisible()                     # fully off-screen + hidden
+    app.shutdown()
+
+
+def test_hidden_suppresses_bubbles_and_nudges(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path, mascot=True))
+    app.start()
+    app.window.show()
+    bubbles = []
+    app.window.show_bubble = lambda text, *a, **k: bubbles.append(text)
+
+    app._begin_hide()
+    app._say("should not appear while hidden")
+    app._trigger_stretch_nudge()
+    assert bubbles == []                                  # no bubble, no nudge while hidden
+    app.shutdown()
+
+
+def test_show_returns_to_pre_hide_position_and_resumes_engine(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path, mascot=True))
+    app.start()
+    app.window.show()
+    app.window.move_to(220, 300)
+    app.mascot.sync_anchor(220 + app.mascot._px // 2, 300 + app.mascot._px)
+    restore = app.window.position()
+
+    app._begin_hide()
+    _walk_until(app, lambda: app._hide_target is None)
+
+    app._begin_show()
+    assert not app._hidden
+    _walk_until(app, lambda: app._hide_target is None)
+
+    assert app._hide_restore == restore                   # reveal targets the pre-hide spot
+    assert app.window.isVisible()
+    assert app.mascot._timer.isActive() is True           # autonomy resumed
+    app.shutdown()
+
+
+def test_nearest_edge_selection(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path, mascot=True))
+    app.start()
+    app.window.show()
+    geo = qapp.primaryScreen().availableGeometry()
+    w, _ = app.window.size_px()
+
+    app.window.move_to(geo.left() + 20, 300)              # left half → hide left
+    tx, _ = app._hide_edge_target()
+    assert tx == geo.left() - w
+
+    app.window.move_to(geo.right() - 20 - w, 300)         # right half → hide right
+    tx, _ = app._hide_edge_target()
+    assert tx == geo.right()
+    app.shutdown()

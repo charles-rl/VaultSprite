@@ -280,6 +280,7 @@ class SystemTray(QSystemTrayIcon):
     """Global manager: scale, per-behavior toggles (exclude-by-name), dismiss/quit."""
 
     scale_changed = Signal(float)          # scale factor applied by App
+    hide_toggled = Signal(bool)            # user toggled "Hide pet" (True = hide)
     dismiss_requested = Signal()
     quit_requested = Signal()
 
@@ -307,6 +308,10 @@ class SystemTray(QSystemTrayIcon):
             self._beh_actions[name] = a
 
         menu.addSeparator()
+        self._hide_action = menu.addAction("Hide pet")
+        self._hide_action.setCheckable(True)
+        self._hide_action.setChecked(False)
+        self._hide_action.toggled.connect(self.hide_toggled.emit)
         menu.addAction("Dismiss").triggered.connect(self.dismiss_requested.emit)
         menu.addAction("Quit VaultSprite").triggered.connect(self.quit_requested.emit)
         self.setContextMenu(menu)
@@ -314,6 +319,14 @@ class SystemTray(QSystemTrayIcon):
 
     def _beh_toggled(self, name: str, checked: bool):
         self.behavior_toggled.emit(name, checked)
+
+    def set_hidden(self, hidden: bool):
+        """Sync the tray checkbox when hide is triggered from the sprite's menu."""
+        act = getattr(self, "_hide_action", None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(hidden)
+            act.blockSignals(False)
 
     def _on_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -333,6 +346,7 @@ class PetOverlayWindow(QWidget):
     drag_released = Signal(float, float)            # px/s at release; ~0 for a plain drop
     ask_vision_requested = Signal(str)              # prompt from right-click menu
     stretch_requested = Signal()                    # "Stretch break" menu item
+    hide_requested = Signal()                       # "Hide pet" menu item
 
     def __init__(self, config: Optional[Config] = None):
         super().__init__()
@@ -519,6 +533,8 @@ class PetOverlayWindow(QWidget):
         ask_action = menu.addAction("Ask what I see")
         stretch_action = menu.addAction("Stretch break")
         menu.addSeparator()
+        hide_action = menu.addAction("Hide pet")
+        menu.addSeparator()
         quit_action = menu.addAction("Quit VaultSprite")
         chosen = menu.exec(global_pos)
         if chosen is ask_action:
@@ -526,6 +542,8 @@ class PetOverlayWindow(QWidget):
                 "Look at my screen and tell me, in one sentence, what I appear to be doing.")
         elif chosen is stretch_action:
             self.stretch_requested.emit()
+        elif chosen is hide_action:
+            self.hide_requested.emit()
         elif chosen is quit_action:
             app = QApplication.instance()
             if app is not None:

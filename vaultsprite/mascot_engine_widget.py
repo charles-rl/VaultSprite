@@ -134,6 +134,25 @@ class MascotEngine(QObject):
         if self.core:
             self.core.state.dragging = dragging
 
+    def set_hidden(self, hidden: bool):
+        """Freeze the ambient engine while the pet is hidden off-screen.
+
+        ``hidden=True`` stops the tick timer so the core stays at its current anchor
+        and never moves the window or changes behavior while the pet is away;
+        ``hidden=False`` restarts ambient animation WITHOUT re-seeding the anchor
+        (unlike :meth:`start`, which puts a fresh pet at floor center)."""
+        if hidden:
+            self._timer.stop()
+            return
+        if self._timer.isActive() or not self.core:
+            return
+        self._rendered_frame = False
+        for _ in range(6):          # warmup ticks render a frame + start a behavior
+            self._tick()
+            if self._rendered_frame:
+                break
+        self._timer.start()
+
     def force_behavior(self, name: str):
         if self.core:
             self.core.force_behavior(name)
