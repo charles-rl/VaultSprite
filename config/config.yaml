@@ -78,7 +78,7 @@ health:
 
 debug:                       # flip to false once troubleshooting is done (no code changes needed)
   vault_logging: true        # rolling trail in <vault>/Memory/Debug/{pet-states,context}.md (title+bucket on change)
-  telemetry_overlay: true    # live on-screen telemetry window (coords, behavior, frame index)
+  telemetry_overlay: false    # live on-screen telemetry window (coords, behavior, frame index)
 
 hide:                        # "hide pet" — walk to the nearest edge, go fully off-screen, pause autonomy
   enabled: true              # when on, the tray/sprite menu offers Hide/Show; reveal returns to the pre-hide spot
