@@ -202,7 +202,12 @@ class TerrainPhysics(QObject):
                 if not self._check_standee_alive():
                     title = (self._standee or {}).get("title", "")
                     self._standee = None
-                    logger.info("standing window lost: %r", title[:60])
+                    logger.info("standing window lost: %r; dropping to settle", title[:60])
+                    # enter a real fall immediately so the pet settles this tick
+                    # (previously only falling_started was emitted and _falling stayed False)
+                    self._falling = True
+                    self._vy = 0.0
+                    self._in_flick = False
                     self.standing_lost.emit(title)
                     self.falling_started.emit()
 
@@ -210,13 +215,14 @@ class TerrainPhysics(QObject):
         x, y = int(pos[0]), int(pos[1])
         w, h = (self._pet_size() or (96, 96))[:2]
 
-        # gravity re-arm: if we're floating above the current surface (e.g. after a
-        # plain drop with no flick), start a natural fall so drops always settle.
-        floor_now = self.get_floor_line(x)
-        if not self._falling and y + h < floor_now - 2:
+        # gravity re-arm: if we're floating above *every* surface (work-area floor AND
+        # tracked window tops — Shijima `on_land()`), start a natural fall so drops and
+        # dropped-on-windows always settle. A pet resting on any surface stays grounded.
+        if not self._falling and y + h < self.get_floor_line(x) - 2 \
+                and not self._on_any_surface(x, y + h):
             self._falling = True
             self._fall_announced = True
-            logger.info("pet is floating above floor at x=%d; falling", x)
+            logger.info("pet is floating above all surfaces at x=%d; falling", x)
             self.falling_started.emit()
 
         if not self._falling:
@@ -287,13 +293,37 @@ class TerrainPhysics(QObject):
     def _check_standee_alive(self) -> bool:
         if self._standee is None or not _win32gui:
             return True
-        hwnd = self._standee.get("rect")
+        hwnd = self._standee.get("hwnd")          # dict stores "hwnd" (was reading .get("rect") → always lost)
         try:
             alive = _win32gui.IsWindow(hwnd) if isinstance(hwnd, int) else False
             visible = _win32gui.IsWindowVisible(hwnd) if alive else False
         except Exception:
             alive, visible = True, True   # probe errors keep us standing (safe side)
         return bool(alive and visible)
+
+    def _on_any_surface(self, x: int, bottom: int) -> bool:
+        """True when the pet's feet rest on *any* surface — work-area floor or a
+        tracked window top (Shijima `state::on_land` includes activeIE borders).
+
+        The gravity re-arm used to measure only against the work-area floor, so a
+        pet perched on a window top read as "floating above floor" and restarted a
+        fall every tick at a fixed x. Checking windows first (cheap standee fast-
+        path, full sweep only when there's no recorded standee) keeps resting pets
+        grounded while genuinely-dangling ones still drop to settle."""
+        tol = 3                                   # matches the re-arm margin (2) + slack
+        if abs(bottom - self.get_floor_line(x)) <= tol:
+            return True
+        if not self._stand_on_windows:
+            return False
+        standee_top = (self._standee or {}).get("top")
+        if standee_top is not None and abs(bottom - standee_top) <= tol:
+            return True                           # still sitting on the window we landed on
+        w, _h = (self._pet_size() or (96, 96))[:2]
+        cx = x + w // 2
+        for win in self._get_visible_windows():
+            if win["left"] <= cx <= win["right"] and abs(bottom - win["top"]) <= tol:
+                return True
+        return False
 
     def _get_visible_windows(self) -> list[dict]:
         """Top edges of visible top-level windows in logical px (Windows only)."""

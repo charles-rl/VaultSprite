@@ -12,6 +12,7 @@ Master tracker for the per-module extraction documentation. One folder per modul
 | 6 | Screen Vision & Remote Ollama Client | `Koishi007/koishi-ai-pet` | `docs/06_remote_agent/README.md` | **Done** |
 | 7 | Obsidian Atomic Memory File Engine | `jrcruciani/obsidian-memory-for-ai` | `docs/07_obsidian_vault/README.md` | **Done** |
 | 8 | Chiptune Sound & Health Nudge Engine | `pieterdd/StretchBreak` + pygame.mixer | `docs/08_health_audio/README.md` | **Done** |
+| 9 | Mascot Behavior Engine (Shimeji XML runtime) — added 2026-08-17, reference re-pointed 2026-08-17 | `DalekCraft2/Shimeji-Desktop` (supersedes `pixelomer/Shijima-Qt`/`libshijima`) + bundled pack `assets/steve_shimeji/` | `docs/09_mascot_engine/README.md` | **Engine built; wired into App/UI** |
 
 All temporary clones have been deleted. **Each module folder is self-contained**: it contains its `README.md` (5-section extraction doc) plus a `source/` subfolder holding verbatim copies of the reference-repo files needed for implementation. The build agent should need nothing outside `docs/`.
 
@@ -27,8 +28,11 @@ All temporary clones have been deleted. **Each module folder is self-contained**
 | `docs/06_remote_agent/source/` | koishi `screen_reader.py`, `llm_client.py`, `context_builder.py`, `pet_agent.py`, `behavior.py`, `prompts.py`, `config.py` |
 | `docs/07_obsidian_vault/source/` | `SPEC-v4.md`, `SPEC-v3.md`, `compact.py`, `lint.py`, `transact.py`, `propose.py`, `review.py`, `compact_v3.py`, `ops_v3.py`, `fact/event/transaction.schema.yaml` |
 | `docs/08_health_audio/source/` | stretchbreak `main.rs`, `idle_monitoring.rs` (Rust — pattern reference only) |
+| `docs/09_mascot_engine/source/` | Shimeji-Desktop Java: `action/`, `behavior/`, `config/`, `environment/`, `script/`, `animation/`, `image/`, `sound/`, `Manager/Mascot/DebugWindow/TrayMenu/Settings/Main/Localizable` + corrected default pack `conf/{actions,behaviors}.xml`, `Mascot.xsd` (Java — pattern reference only) |
 
 > Shimeji-EE gravity formulas (Module 4) are quoted in its README §3.3; those repos were not re-cloned.
+
+> Module 9 reference **changed 2026-08-17**: `pixelomer/Shijima-Qt`/`libshijima` (C++/GPL) → `DalekCraft2/Shimeji-Desktop` (canonical Shimeji-ee, JDK 25, New-BSD/zlib). The clone was extracted into `docs/09_mascot_engine/source/` then deleted per policy; patterns ported to pure Python; the *data* side ships as a standard Shimeji pack (`assets/steve_shimeji/conf/*.xml`).
 
 ## Key Findings & Divergences From The Outline (read before implementing)
 
@@ -39,3 +43,4 @@ All temporary clones have been deleted. **Each module folder is self-contained**
 5. **Module 7**: the spec has **no daily-journal file type** — `append_journal()` is hand-built in the doc from the atomic-write pattern. No true append helper exists in the reference (append-only is by convention).
 6. **Module 8**: **StretchBreak is Rust** (rodio/GTK), not pygame. Only its timer state-machine + non-blocking-sound *patterns* are extracted; the pygame.mixer recipe is canonical (from official pygame docs). StretchBreak's default break is 20 min — VaultSprite should use 45–60 min per outline.
 7. **Module 2**: Shirros config has **no per-state durations** (global 100 ms frame). The `get_next_state()` contract in the outline needs a `duration_ms` field added to the config schema.
+8. **Module 9 (new, 2026-08-17; reference re-pointed same day)**: reference is `DalekCraft2/Shimeji-Desktop` (Java, New-BSD/zlib; supersedes C++/GPL `libshijima`) — patterns ported to pure Python (no Qt in the core); asset data ships as a standard Shimeji pack (`assets/steve_shimeji/`); solo-pet constraint makes Breed/SelfDestruct/Scan/Broadcast action types no-op advances by design, and Breed-only frames 38–46 are repurposed as visual-only gags so every frame renders.

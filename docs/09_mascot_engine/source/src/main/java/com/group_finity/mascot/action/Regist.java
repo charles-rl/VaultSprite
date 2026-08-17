@@ -1,0 +1,99 @@
+package com.group_finity.mascot.action;
+
+import com.group_finity.mascot.Main;
+import com.group_finity.mascot.Mascot;
+import com.group_finity.mascot.animation.Animation;
+import com.group_finity.mascot.script.VariableException;
+import com.group_finity.mascot.script.VariableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.ResourceBundle;
+import java.util.concurrent.locks.ReadWriteLock;
+
+/**
+ * Action for resisting being dragged.
+ *
+ * @author Yuki Yamada
+ * @author Shimeji-ee Group
+ */
+// TODO: Try to fix the typos of "resist" and "resistance" being "regist" and "registance" without breaking compatibility.
+public class Regist extends ActionBase {
+    private static final Logger log = LoggerFactory.getLogger(Regist.class);
+
+    private static final String PARAMETER_OFFSETX = "OffsetX";
+    private static final int DEFAULT_OFFSETX = 0;
+
+    private static final String PARAMETER_OFFSETTYPE = "OffsetType";
+    private static final String DEFAULT_OFFSETTYPE = "ImageAnchor";
+
+    private double scaling;
+
+    public Regist(ResourceBundle schema, final List<Animation> animations, final VariableMap context) {
+        super(schema, animations, context);
+    }
+
+    @Override
+    public void init(final Mascot mascot) throws VariableException {
+        super.init(mascot);
+
+        scaling = Main.getInstance().getSettings().scaling;
+    }
+
+    @Override
+    public boolean hasNext() throws VariableException {
+        if (!super.hasNext()) {
+            return false;
+        }
+
+        int offsetX = (int) Math.round(getOffsetX() * scaling);
+        if (getOffsetType().equals(getSchema().getString("Origin"))) {
+            offsetX = getMascot().getImage().getCenter().x - offsetX;
+        }
+
+        /* FIXME: This only compares the x-coordinates of the cursor and the mascot, but not the y-coordinates,
+            so it's possible to move the cursor up/down away from the mascot and still be holding the mascot
+            from far away. */
+        /* Return true if the cursor's x-coordinate has moved less than 5 units from the mascot's x-coordinate.
+        Note that this action does not update the mascot's position, so this condition will use the mascot's
+        *initial* position unless the position is updated from somewhere else. */
+        return Math.abs(getEnvironment().getCursor().getX() - getMascot().getAnchor().x + offsetX) < 5;
+    }
+
+    @Override
+    protected void tick() throws LostGroundException, VariableException {
+        getMascot().setDragging(true);
+
+        // Animate
+        getAnimation().apply(getMascot(), getTime());
+
+        if (getTime() + 1 >= getAnimation().getDuration()) {
+            // Ended because the period has passed.
+
+            getMascot().setLookRight(Math.random() < 0.5);
+
+            throw new LostGroundException("Mascot finished Regist action");
+        }
+    }
+
+    @Override
+    protected void refreshHotspots() {
+        ReadWriteLock lock = getMascot().getHotspotLock();
+        lock.writeLock().lock();
+        try {
+            // action does not support hotspots
+            getMascot().clearHotspots();
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    private int getOffsetX() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_OFFSETX), Number.class, DEFAULT_OFFSETX).intValue();
+    }
+
+    private String getOffsetType() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_OFFSETTYPE), String.class, DEFAULT_OFFSETTYPE);
+    }
+}

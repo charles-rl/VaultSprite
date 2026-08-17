@@ -7,10 +7,13 @@ while implementing. Read this before touching code — several items here only m
 sense because of PySide6 6.11 build quirks found empirically on this box.
 
 Built: Python 3.13 (uv), Linux dev box, offscreen Qt validation. Target: Windows 11.
-Status at time of writing: **91 tests passing, `--smoke` exit 0, render check PASS.**
+Status at time of writing: **100 tests passing, `--smoke` exit 0, render check PASS.**
 (2026-08-17 P1 hardening pass added vault sandboxing/size-watcher/concurrency + the standalone
 `tests/test_vault_and_ai.py` runner; see §9. The earlier maintenance pass added the two M4
-airborne-clamp tests.) Nothing is committed yet — the entire tree is untracked in git (greenfield repo).
+airborne-clamp tests; the same-day Shijima cross-reference pass added the M9 mascot engine,
+context whole-word matching + decay, off-thread screenshot capture, vault debug trails, and four
+M4 settle-guarantee regression tests — see §9 top entry. The repo now has real commit history:
+`git log`, incl. `34028c3` which bundled the steve_shimeji pack.)
 
 ---
 
@@ -31,19 +34,27 @@ vaultsprite/
   remote_agent.py         M6: RemoteAgent(QObject) mss capture → openai-in-QThread dispatch
   obsidian_vault.py       M7: ObsidianVault(QObject) — sandboxed atomic dot-temp writes, size watcher
   health_audio.py         M8: SoundBank (pygame no-op fallback) + WorkTimer(QObject)
-  main.py                 App class = the SINGLE FSM owner; assembles/wires all 8 modules
+  mascot_engine.py        M9: MascotCore — pure-Python Shimeji runtime (parser, behavior
+                          roulette, action runners). NOT yet wired into App/UI (see §3-M9/§4)
+  mascot_environment.py   M9: border/area geometry + safe ${}/#{} expression evaluator (no Qt)
+  main.py                 App class = the SINGLE FSM owner; assembles/wires all modules (M1-M8 wired;
+                          M9 pending — see below)
 config/… assets/config.yaml is separate:
 assets/config.yaml        sprite state matrix (dict schema, not Shirros list) — repoint this
                           to swap in real sprites/sheets without touching code
 assets/sprites/*.gif      generated placeholder mascot, 96×96, 4 frames/state, transparent
+assets/steve_shimeji/     bundled Shimeji-ee community pack (user-supplied): conf/actions.xml +
+                          behaviors.xml, img/Steve/shime1..46.png, Shimeji-ee.jar + lib/*.jar
+                          (reference only — never executed by VaultSprite)
 assets/sounds/{step,chirp,yawn}.wav   synthesized 8-bit mono WAVs (22 kHz)
 tools/generate_assets.py  deterministic-ish asset generator (RNG seed 42 for drawing; the
                           shared RNG makes regenerated .wavs vary between runs — cosmetic only)
 tools/render_check.py     offscreen boot → composites live frame, asserts transparency by
                           checking corners stay pure magenta, pixel-diffs two captures ~1.4 s
                           apart to prove QMovie is advancing; writes /tmp/vaultsprite_render.png
-tests/                    91 tests, all offscreen-safe (conftest: qapp fixture + FakeConfig); plus
-                           tests/test_vault_and_ai.py — a standalone direct-run runner for the P1 pass
+tests/                    100 tests, all offscreen-safe (conftest: qapp fixture + FakeConfig);
+                          test_mascot_engine doesn't exist yet (M9 not wired/tested — see §4)
+                          plus tests/test_vault_and_ai.py — a standalone direct-run runner for P1
 ```
 
 Run commands (see AGENTS.md for the canonical list): `uv run vaultsprite`,
@@ -89,7 +100,10 @@ StatEngine                                App
   signal_hungry/tired/bored ──────────► bubble line + vault.append_journal + vault.write_fact
 
 ContextDetector                           App
-  context_changed(WORK|PLAY) ─────────► stats.set_active, health.set_active, record_event
+   context_changed(WORK|PLAY|UNKNOWN) ─► WORK activates stats+health; PLAY and decayed-UNKNOWN
+                                           both deactivate (2026-08-17 fix: old code left them
+                                           active on UNKNOWN → stretch nudges fired while idle),
+                                           record_event (carries real title), debug trail
 
 WorkTimer                                 App
   stretch_nudge ──────────────────────► force_state("stretch_nudge"), chirp, bubble,
@@ -100,7 +114,16 @@ RemoteAgent                               App + window menu
   error(str) ─────────────────────────► log "vision note: …"
 
 Vision loop: QTimer in App (interval = remote.ask_interval_ms; 0 disables). Starts only if
-agent.enabled. Each tick calls agent.ask with a fixed prompt + current context string.
+agent.enabled. Each tick calls agent.ask with a fixed prompt + `_vision_window_context()`:
+the REAL foreground title (`context.last_title`) plus the detected bucket, or an explicit
+"[no foreground window title captured…]" line — never a bare "WORK" (that bug made the LLM
+describe a window titled WORK).
+
+Debug trails: every `App._play(transition)` calls `_debug_log("pet-states", …)` and each context
+change logs to `_debug_log("context", …)` → `vault.append_debug_log()` rolling files under
+`Memory/Debug/` (gated by `debug.vault_logging`, on by default; best-effort, never raises).
+Config also ships `debug.telemetry_overlay: true` — the flag is read nowhere yet; the on-screen
+telemetry window it describes is a known gap (§4), mirroring Shijima's inspector dialog.
 ```
 
 `main()` also auto-sets `QT_QPA_PLATFORM=offscreen` **only when `--smoke` is passed AND no
@@ -180,10 +203,14 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ### M4 terrain_physics
 - **Plain drops fall via a "gravity re-arm" check at the top of `_tick()`**: if not falling and the
-  pet's bottom is above the floor by more than 2 px, it starts a natural fall. This was needed
-  because the window only emits `drag_released` (no separate plain-drop signal). It means *any*
-  time you position() the window mid-air with physics enabled, it settles — convenient for tests
-  and drag-to-reposition, harmless otherwise.
+  pet's bottom is above every surface by more than 2 px — i.e. `get_floor_line(x)` AND no tracked
+  window top (new `_on_any_surface()`, Shijima `on_land()` cross-ref) — it starts a natural fall.
+  This was needed because the window only emits `drag_released` (no separate plain-drop signal). It
+  means *any* time you position() the window mid-air with physics enabled, it settles — convenient
+  for tests and drag-to-reposition, harmless otherwise. **Bug fix (2026-08-17 Shijima pass):** the
+  old check measured only against the work-area floor, so a pet perched on a *window top* read as
+  "floating above floor" and re-started a fall every tick at a fixed x (the reported "pet is
+  floating above floor at x=…; falling" stuck state). Resting on any surface now keeps it grounded.
 - **Flight is clamped to the work area**: `_tick()` bounces the pet off side walls *and* the top
   edge (`wall_bounce`, single multiplication — see fix below) and never lets it leave the screen
   while airborne. Without this, an up-flick launched the pet above the display; it then fell back
@@ -205,16 +232,28 @@ no-op on Windows (guarded by `os.name != "nt"`).
   sweep crossing test against visible window tops (feet = middle third of width, koishi style),
   standee liveness re-check every ~15 ticks → `standing_lost(title)`. Inert on Linux; no tests for
   it exist because the win32 surface can't run here. `snap_to_ground()` is available but main
-  doesn't call it (the re-arm check supersedes it).
+  doesn't call it (the re-arm check supersedes it). **Bug fixes (2026-08-17 Shijima pass):**
+  `_check_standee_alive()` once read `.get("rect")` from a dict that stores the handle under
+  `"hwnd"` → every probe reported "window lost" for live windows. On standee loss it also only
+  emitted `falling_started` without setting `_falling`, so the pet could sit mid-air forever —
+  loss now sets `_falling = True, _vy = 0` immediately (a real fall that settles this tick). The
+  four P2 regression tests in `tests/test_terrain_physics.py` (drop-settles-on-window, perched-stays-
+  grounded, standee-loss-falls-and-settles, windows-appear/vanish end-to-end) exercise these on Linux
+  by monkeypatching `_get_visible_windows`/`_check_standee_alive`.
 
 ### M5 context_detector
-- **`classify(title)` returns `None` for unknown/empty titles** (not "UNKNOWN"); the poller keeps
-  its last-known bucket on None. Only real bucket switches emit `context_changed`. Initial state is
-  `"UNKNOWN"`. App maps WORK→active, PLAY→inactive+reset; UNKNOWN falls through (keeps previous).
-- Keyword lists are **case-insensitive substring** matches from `config.yaml`. Note: the outline's
-  literal "vs code" keyword would NOT match a window titled "Visual Studio Code — file.py", so the
-  config additionally ships `"visual studio"` and `"studio code"`. If you add IDEs, test with the
-  *actual* title string (see `tests/test_context_detector.py` boundary table).
+- **`classify(title)` returns `None` for unknown/empty titles** (not "UNKNOWN"). Unknown apps don't
+  clear the bucket immediately: after `context.unknown_decay_polls` **consecutive** no-match polls
+  (default 6 ≈ 30 s) the poller decays to UNKNOWN and emits it; a real match resets the streak.
+  Initial state is `"UNKNOWN"`. App maps WORK→active, PLAY *and* decayed-UNKNOWN → inactive+reset
+  (2026-08-17 fix: the old code kept stats/health active on UNKNOWN — "always switched to work").
+  Only real bucket switches emit `context_changed`. Detector keeps `last_title` for vision prompts,
+  logging and debug trails. **Bug fix (same pass):** keyword matching is now **whole-word**
+  (`_keyword_in`) — a bare substring match made e.g. "The World of Tanks" count as WORK because the
+  config ships `"word"`. Title punctuation (spaces/dashes/colons/parens/dots) counts as word
+  boundaries, so "Visual Studio Code — file.py" still matches. See `tests/test_context_detector.py`
+  boundary table + the three decay tests (`test_unknown_context_decays_to_unknown`,
+  `test_work_title_resets_unknown_streak`, `test_empty_titles_also_count_as_unknown_polls`).
 - Poller is a daemon `threading.Thread`; `poll_once()` runs one cycle synchronously — that's the
   path tests use (the thread variant is also covered end-to-end with an injected probe, since
   pywinctl can't be imported here: on Linux `_pwc` is None and `default_title_probe()` returns "").
@@ -223,6 +262,14 @@ no-op on Windows (guarded by `os.name != "nt"`).
 - **Transport = sync openai SDK inside a per-call QThread** (`_BrainWorker`), exactly the koishi
   pattern you chose. `ask(prompt, window_context=..., screenshot=True)` returns immediately; reply
   lands on `response_ready(str)` via queued signal; failures land on `error(str)`.
+  **Async fix (2026-08-17):** *everything* blocking — the self-foreground check, mss capture +
+  resize/encode, payload building AND the LLM call — now runs inside that per-call worker. An
+  earlier version captured the screenshot on the GUI thread before dispatching; with a slow or
+  first-load Ollama inference plus a big screen grab this froze the overlay ("when I ask what I
+  see it freezes"). `ask()` itself is back to returning in microseconds.
+- **Base URL (config/env, machine-specific):** config ships the dev-tunnel URL (`…devtunnels.ms/v1`)
+  for the user's Windows PC; on this Linux dev box override with the local Ollama — env
+  `OLLAMA_BASE_URL` beats YAML (`config.py` applies overrides at load). Same key, no code change.
 - **Base URL gets a trailing slash appended in `__init__`** (`self.base_url`) — Ollama's OpenAI-compat
   wants `<host>/v1/`; if you change the config to include one, it won't double up (it only appends
   when missing). Dummy API key `"ollama"` is mandatory for the SDK constructor.
@@ -273,7 +320,14 @@ no-op on Windows (guarded by `os.name != "nt"`).
   - *Concurrency:* one module-wide `threading.RLock` wraps each public method's read-modify-write,
     so parallel callers can't lose journal lines (atomic rename already prevented torn reads; the
     lock fixes lost updates). Process-level only — VaultSprite is a single instance and takes no
-    cross-process file locks.
+     cross-process file locks.
+  - *Debug trails* (2026-08-17 Shijima pass): new public `append_debug_log(category, entry)` →
+    rolling `- [HH:MM:SS] …` lines under `Memory/Debug/<slug>-<day>.md`. Same atomic RMW + storage
+    audit as the journal but **without** its frontmatter contract (a debug trail is not a memory
+    note). The sandbox guard (`_resolve_safe`) applies like every other public write. App feeds it
+    from `debug.vault_logging` (on by default): every FSM transition ("pet-states") and context
+    change ("context"). This is the user-facing debugging aid for future "why did it …" reports —
+    check these files before re-running anything when a behavior question comes up.
 - **M6 note:** `RemoteAgent`'s text fallback was exercised live against this box's Ollama (see §9):
   with the config model loaded, `/api/chat` vision replies describe probe images correctly; on any
   error path `build_messages()` degrades to a plain-string user message carrying window/OCR metadata.
@@ -292,23 +346,71 @@ no-op on Windows (guarded by `os.name != "nt"`).
   disabled" once at startup — that line in smoke output is expected, not an error). `play/stop/
   play_loop` never raise regardless.
 
+### M9 mascot_engine + mascot_environment (built 2026-08-17 — **wired into App 2026-08-17**)
+- Pure-Python port of the Shimeji-ee runtime; pattern source-of-truth is **`DalekCraft2/Shimeji-Desktop`**
+  (canonical Shimeji-ee, JDK 25, New-BSD/zlib; supersedes the earlier C++/GPL `pixelomer/Shijima-Qt`/
+  `libshijima` study). Reference cloned, extracted into `docs/09_mascot_engine/source/`, then deleted
+  per policy. Doc: `docs/09_mascot_engine/README.md` (geometry semantics, the manager's 4-level
+  tick-recovery ladder, behavior roulette, action types, `${once}`/`#{per-tick}` expressions).
+- **What exists and is tested-by-construction (unit-testable, zero Qt):** `MascotCore` in
+  `mascot_engine.py` — parses the standard community-pack XML (`assets/steve_shimeji/conf/
+  {actions,behaviors}.xml`, bundled with commit `34028c3`; also `Shimeji-ee.jar` + `lib/*.jar` kept
+  as reference only, **never executed**), runs the weighted behavior roulette (Frequency weights,
+  Hidden built-ins `Fall`/`Dragged`/`Thrown`, NextBehavior Add semantics), drives action runners
+  (`Stay`/`Move`/`Jump`/`Fall`/`Offset`/`Look` + `Sequence`/`Select`/references) over raw PNG frames,
+  and ports the manager's **4-level recovery ladder** (normal → force-Fall → detach-from-borders →
+  reset-position) so a malformed action can never wedge the pet. `mascot_environment.py` holds the
+  border/area geometry (`BORDER_TOL == 1.0 px`, Shimeji-ee default) and a **whitelist tokenizer +
+  Pratt parser** for Shimeji scripting — no `eval()` anywhere; unknown names evaluate to False so
+  exotic community behaviors degrade safely. Solo-pet by design: Breed/SelfDestruct/Scan/Broadcast-
+  family types parse but act as no-op advances.
+- **Wiring (2026-08-17):** `MascotEngine(QObject)` (in `mascot_engine.py`) owns the `QTimer` at
+  `mascot.tick_ms: 40` and emits `pose_changed`/`behavior_changed`/`fell_down`/telemetry; `App`
+  creates it, feeds a fresh env snapshot each tick (Qt `availableGeometry()`, cursor dx/dy,
+  tracked window rect ÷ `devicePixelRatio()`), and forces external behaviors (drag → Dragged,
+  flick → Thrown, nudge/stretch/vision-reply → talking) via `core.force_behavior()`. A pixmap
+  cache decodes the single PNG frames this PySide6 build reads reliably; the sprite is mirrored
+  by `looking_right`. `debug.telemetry_overlay` drives an on-screen inspector; `debug.vault_logging`
+  (default true) writes the telemetry via `append_debug_log` to `Memory/Debug/mascot-<day>.md`.
+  `QSystemTrayIcon` manager: global scale, behavior toggles (exclude-by-name), dismiss/quit.
+- **Pack bug fixed:** `assets/steve_shimeji/conf/actions.xml` L449/539 had `Math.random*100`
+  (missing parens → NaN TargetX in ClimbAlongWall/ClimbIEWall tails); patched to `Math.random()*100`.
+  Same bug exists upstream in Shimeji-Desktop's default XML (also fixed only locally).
+- **Sprite maximization:** Breed-only frames 38–46 are repurposed as a **visual-only gag** — the
+  PullUp/Divide flourish plays (all 46 frames render) without spawning a second pet. Breed stays a
+  no-op advance.
+- **Ownership reconciliation** (kept when wiring): App stays the sole decider of *external* forces;
+  the engine's ambient roulette decides idle-time behavior on its own tick — exactly how TerrainPhysics
+  already owns its ticks and reports through signals.
+
 ---
 
 ## 4. Known gaps / TODOs for whoever's next (in priority order)
 
-1. **step.wav and yawn.wav are generated but unwired.** M8 doc §5.4 wants walking→step loop,
-   sleeping→yawn once. Wiring point: in `main.py`, watch state transitions (`player.state_finished`
-   or hook inside `_play`) → `sounds.play_loop("step")` when entering `walking`, stop on exit;
-   `sounds.play("yawn")` once per entry to `sleeping`. Only `chirp` is used today (click + nudge).
-2. **No stat persistence.** Stats reset to config `stats.initial` on restart (DyberPet's
+1. **M9 mascot engine is now wired into App/UI** (see §3-M9; done 2026-08-17): `MascotEngine`
+   QTimer at `mascot.tick_ms: 40` drives `core.tick()` with a fresh env snapshot each tick; App
+   forces external behaviors via `force_behavior("Dragged"/"Thrown"/…)` (App stays sole owner of
+   *external* forces); single-read `QImageReader().read()` pixmap cache in the UI layer; behavior/
+   pose signals let App log to the Vault, play sounds and force "talking". The running pet now
+   renders `img/Steve/shime*.png` through the engine (old generated GIF sprites superseded). No
+   audio files exist in the pack — keep the synthesized SFX.
+2. **On-screen telemetry window** — built (2026-08-17): `debug.telemetry_overlay: true` shows a
+   live coords/behavior/frame overlay mirroring Shimeji-Desktop's inspector; `debug.vault_logging:
+   true` (default) writes the same telemetry via `append_debug_log`. Both are config-flippable.
+3. **step.wav and yawn.wav are generated but unwired.** M8 doc §5.4 wants walking→step loop,
+    sleeping→yawn once. Wiring point: in `main.py`, watch state transitions (`player.state_finished`
+    or hook inside `_play`) → `sounds.play_loop("step")` when entering `walking`, stop on exit;
+    `sounds.play("yawn")` once per entry to `sleeping`. Only `chirp` is used today (click + nudge).
+4. **No stat persistence.** Stats reset to config `stats.initial` on restart (DyberPet's
    `conf.py` PetData port was explicitly optional in M3 §5.6 and skipped). A JSON/YAML sidecar at
    vault or repo level is the obvious shape if wanted.
-3. **Health-nudge dismissal path** (§3-M8 above): add an overlay hook (click during stretch_nudge,
+5. **Health-nudge dismissal path** (§3-M8 above): add an overlay hook (click during stretch_nudge,
    or menu item) → `health.resolve_nudge("stretch"|"skip")`. Postpone semantics exist and are tested.
-4. **Windows-only paths untested**: window-standing + standee liveness, self-screenshot skip,
+6. **Windows-only paths untested**: window-standing + standee liveness, self-screenshot skip,
    pywinctl polling with a real title source, Shell_TrayWnd (not coded). All guarded; all inert on
-   Linux by design. They need a Windows box to exercise — budget real time there.
-5. **No LLM backoff**: repeated unreachable-H100 logs each ask_interval (default 5 min). Cheap fix:
+   Linux by design. They need a Windows box to exercise — budget real time there. (The settle-logic
+   bugs that *could* be faked via monkeypatch are now covered — see §3-M4 P2 tests.)
+7. **No LLM backoff**: repeated unreachable-H100 logs each ask_interval (default 5 min). Cheap fix:
    exponential delay or skip-after-N until context changes.
 
 ---
@@ -328,7 +430,15 @@ no-op on Windows (guarded by `os.name != "nt"`).
   to the widget's current geometry; once you move the window mid-drag your math drifts. Hand-built
   events with explicit globals (`tests/test_ui_overlay.py::_evt`) are deterministic — prefer those.
 
-## 6. Testing notes (how the 91 tests work, and how to extend them)
+## 6. Testing notes (how the suite works, and how to extend them)
+
+- `tests/test_mascot_engine.py` (M9, pure Python, no Qt): drives `MascotCore.tick()` directly —
+  parses the real Steve pack, asserts the Fall lands, breed stays no-op while the gag plays frames
+  38-46, excluded behaviors never go ambient, and the ThrowIe/IE-carrying actions parse instead of
+  being dropped.
+
+- M5 decay tests drive `poll_once()` with a short `context.unknown_decay_polls` (2) — no wall-time
+  waits; boundary-table rows now include whole-word negatives ("The World of Tanks" → None).
 
 - `tests/test_vault_and_ai.py` is **direct-run only** (`uv run python tests/test_vault_and_ai.py`;
   env: `OLLAMA_BASE_URL`, `VISION_PROBE_TIMEOUT_S`). pytest collects it by name — so it must create
@@ -368,6 +478,74 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ## 9. Changelog
 
+### 2026-08-17 — M9 completion pass: reference → DalekCraft2, engine bug-fixed, wired into App/UI
+1. **Reference re-pointed** from `pixelomer/Shijima-Qt`/`libshijima` (C++/GPL) to
+   `DalekCraft2/Shimeji-Desktop` (canonical Shimeji-ee, JDK 25, New-BSD/zlib). Cloned → extracted
+   verbatim Java + corrected default XML into `docs/09_mascot_engine/source/` → deleted. The loose
+   `docs/mascot_engine_notes.md` became `docs/09_mascot_engine/README.md`; INDEX/AGENTS/OUTLINE/BUILD
+   refs updated.
+2. **Engine bug-fix sweep** (`mascot_engine.py`/`mascot_environment.py`) — these were latent and
+   would crash/degade the running pet: `ThrowIe` type-case bug dropped all IE-carrying actions;
+   `SelectAction.next_child` was a `pass` stub (now first-matching-branch + periodic re-eval);
+   `_DraggableAction` broke on the first pose; `_fallback_fall` walrus mess; `_refs` never
+   initialized → inline `<ActionReference>`s never linked (and composite refs were rejected);
+   `_NoOpInline()` called with no args / crashed if ticked; `_NamedSource` dropped per-ref frequency
+   + arg-order bug; `_pick_behavior` `return node.node` on a `BehaviorNode`; `parse()` force-hid
+   built-ins on the wrong object; **`Area.is_on` referenced nonexistent `_vb`/`_hb`**; `isinstance(v,
+   _UNDEFINED)` misuse; `finalize()` didn't recurse through composite/reference actions (caused
+   "init() called twice"); init-limit counted successes not failures (every behavior false-failed
+   after ~20 starts); and the **`{{...}}` double-brace findall bug** that silently matched zero
+   `<Animation>` poses + zero `<NextBehavior>`s (so the pack's actions were frame-less and its
+   behavior roulette never used per-behavior next-pools).
+3. **Pack fixed**: `assets/steve_shimeji/conf/actions.xml` L449/539 `Math.random*100` → `*()`
+   (same upstream bug exists in Shimeji-Desktop's default XML).
+4. **Sprite maximization**: Breed-only frames 38–46 are reused as a **visual-only gag** — behaviors
+   `SplitIntoTwo`/`PullUpShimeji` now play their Breed animation (shime42-46 / 38-41) with no spawn
+   (`allows_breeding=False`). Every frame in the pack is now renderable.
+5. **Wired into App/UI**: new `vaultsprite/mascot_engine_widget.py` `MascotEngine(QObject)` owns the
+   tick `QTimer` at `mascot.tick_ms` (40 ms), feeds Qt screen/cursor env, renders scaled+mirrored
+   Steve frames, and emits `frame_changed`/`behavior_changed`/`position_changed`. `App` (when
+   `mascot.enabled: true`) lets M9 drive ambient animation + position, forces external behaviors
+   (drag→Dragged, flick→Thrown via `inject_throw`, stretch/reply→Sit/SitAndFaceMouse), and writes
+   M9 telemetry to the Vault. Added `SystemTray` (scale + exclude-by-name toggles + dismiss/quit)
+   and `TelemetryOverlay` (live coords/behavior/frame), driven by `debug.telemetry_overlay` +
+   `debug.vault_logging` (both default true).
+6. **Tests**: new `tests/test_mascot_engine.py` (12 pure-Python tests). Suite 74 → **86 passed**;
+   `--smoke` exits 0.
+
+### 2026-08-17 — Shijima cross-reference pass: M9 mascot engine built; context/vision/physics fixes
+Addressed the open items in `USER_FEEDBACK.md` ("Recent User Notes": floating-above-floor stuck
+state, Shijima-Qt study request, steve_shimeji assets, vision freeze, always-WORK context) —
+commit `34028c3` bundled the pack; this entry covers the code + docs around it:
+1. **M9 mascot engine** (§3-M9): pure-Python libshijima runtime built from a read-only study of
+   `pixelomer/Shijima-Qt` (+ `libshijima`; cloned then deleted per policy). `mascot_engine.py`
+   (parser, behavior roulette with Add/Hidden semantics, action runners incl. Fall/Jump integration,
+   4-level recovery ladder) + `mascot_environment.py` (border geometry, whitelist expression
+   evaluator — no `eval`). **Not yet wired into App/UI** and not sprite-swapped: top §4 item.
+2. **M4 settle guarantees** (§3-M4): gravity re-arm now checks `_on_any_surface()` (floor *or* a
+   tracked window top, Shijima `on_land()` cross-ref) — fixes the reported "pet is floating above
+   floor at x=…; falling" stuck state for perched pets; standee liveness probe fixed
+   (`.get("rect")` → `"hwnd"`) and loss now starts a *real* fall; 4 new regression tests.
+3. **M5 context fixes** (§3-M5): whole-word keyword matching (`_keyword_in`; "The World of Tanks"
+   no longer reads as WORK) + `unknown_decay_polls` (6 ≈ 30 s consecutive no-match polls → decay to
+   UNKNOWN; real matches reset the streak). App now deactivates stats/health on PLAY *and*
+   decayed-UNKNOWN — fixes "context is always switched to work". 5 new tests.
+4. **M6 async fix** (§3-M6): screenshot capture + self-foreground check moved inside the per-call
+   QThread worker alongside the LLM call — "ask what I see" no longer freezes the GUI (an mss grab
+   was running on the GUI thread before). Config base URL = dev tunnel for the Windows PC; Linux
+   dev overrides via `OLLAMA_BASE_URL` env (no code change). Vision prompts now carry the real
+   foreground title + bucket instead of a bare "WORK" string.
+5. **Debug trails** (§2, §3-M7): new sandboxed public API `ObsidianVault.append_debug_log(category,
+   entry)` → rolling `Memory/Debug/<cat>-<day>.md`; App logs every state transition and context
+   change there (gated by `debug.vault_logging`, default on; best-effort). `record_event` carries
+   the real title. `debug.telemetry_overlay` flag reserved for the still-unbuilt telemetry window.
+6. **Docs**: `IMPLEMENTATION_OUTLINE.md` gained the Module 9 section + Shijima-Qt as reference repo;
+   `docs/mascot_engine_notes.md` is the M9 pattern source-of-truth (incl. libshijima line map);
+   this file, AGENTS.md, README.md and docs/INDEX.md updated to match in this pass.
+Housekeeping: test suite 91 → **100** (new collected items: 4 M4 settle-guarantee tests +
+3 new M5 decay test functions + 2 whole-word boundary-table rows; no deletions — the older "74"
+count in earlier notes predates the P1 vault additions).
+
 ### 2026-08-17 — P1 hardening pass: vault sandboxing, storage watcher, vision verification
 1. **Write isolation lock** (§3-M7): `ObsidianVault._resolve_safe()` gates all three public write
    APIs on `os.path.realpath` containment within the vault root (with the sibling-prefix fix the
@@ -400,7 +578,8 @@ no-op on Windows (guarded by `os.name != "nt"`).
    free of module-level Qt objects (lazy host inside `main()`).
 
 ### 2026-08-17 — user-feedback maintenance pass (commit after `7d35f4e`)
-Addressed the report in `USER_NOTES.md` (then rewritten as a resolution log):
+Addressed the report that is today's `USER_FEEDBACK.md` (named `USER_NOTES.md` at the time of that
+pass; renamed 2026-08-17 via `git mv`, then rewritten as a resolution log):
 1. **Model**: `remote.ollama_model` → `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL` (`config.yaml`,
    `remote_agent.py` fallback, 4 test pins, docs/06). Verified with `ollama ls`; the old `qwen2.5:27b`
    is not installed here — which also explains why no vision replies ever surfaced (see item 8 in

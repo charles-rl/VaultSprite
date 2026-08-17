@@ -1,0 +1,98 @@
+package com.group_finity.mascot.action;
+
+import com.group_finity.mascot.Main;
+import com.group_finity.mascot.animation.Animation;
+import com.group_finity.mascot.environment.Area;
+import com.group_finity.mascot.script.VariableException;
+import com.group_finity.mascot.script.VariableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.ResourceBundle;
+
+/**
+ * Action of walking with a window.
+ *
+ * @author Yuki Yamada
+ * @author Shimeji-ee Group
+ */
+public class WalkWithIE extends Move {
+    private static final Logger log = LoggerFactory.getLogger(WalkWithIE.class);
+
+    private static final String PARAMETER_IEOFFSETX = "IeOffsetX";
+    private static final int DEFAULT_IEOFFSETX = 0;
+
+    private static final String PARAMETER_IEOFFSETY = "IeOffsetY";
+    private static final int DEFAULT_IEOFFSETY = 0;
+
+    // private double scaling;
+
+    public WalkWithIE(ResourceBundle schema, final List<Animation> animations, final VariableMap context) {
+        super(schema, animations, context);
+    }
+
+    /* @Override
+    public void init(final Mascot mascot) throws VariableException {
+        super.init(mascot);
+
+        scaling = Main.getInstance().getSettings().scaling;
+    } */
+
+    @Override
+    public boolean hasNext() throws VariableException {
+        return Main.getInstance().getSettings().throwing && super.hasNext();
+    }
+
+    @Override
+    protected void tick() throws LostGroundException, VariableException {
+        final Area activeIE = getEnvironment().getActiveIE();
+        if (!activeIE.isVisible()) {
+            throw new LostGroundException("Window is not visible");
+        }
+
+        // Can't use scaling here yet because it doesn't work for scales other than 1; the mascots will just release the window immediately.
+        // final int offsetX = (int) Math.round(getIEOffsetX() * scaling);
+        // final int offsetY = (int) Math.round(getIEOffsetY() * scaling);
+        final int offsetX = getIEOffsetX();
+        final int offsetY = getIEOffsetY();
+
+        // Check whether the mascot has the window properly
+        if (getMascot().isLookRight()) {
+            if (getMascot().getAnchor().x - offsetX != activeIE.getLeft()
+                    || getMascot().getAnchor().y + offsetY != activeIE.getBottom()) {
+                throw new LostGroundException("Mascot is not holding window");
+            }
+        } else {
+            if (getMascot().getAnchor().x + offsetX != activeIE.getRight()
+                    || getMascot().getAnchor().y + offsetY != activeIE.getBottom()) {
+                throw new LostGroundException("Mascot is not holding window");
+            }
+        }
+
+        super.tick();
+
+        // Move window
+        if (activeIE.isVisible()) {
+            if (getMascot().isLookRight()) {
+                getEnvironment().moveActiveIE(
+                        getMascot().getAnchor().x - offsetX,
+                        getMascot().getAnchor().y + offsetY - activeIE.getHeight()
+                );
+            } else {
+                getEnvironment().moveActiveIE(
+                        getMascot().getAnchor().x + offsetX - activeIE.getWidth(),
+                        getMascot().getAnchor().y + offsetY - activeIE.getHeight()
+                );
+            }
+        }
+    }
+
+    private int getIEOffsetX() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_IEOFFSETX), Number.class, DEFAULT_IEOFFSETX).intValue();
+    }
+
+    private int getIEOffsetY() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_IEOFFSETY), Number.class, DEFAULT_IEOFFSETY).intValue();
+    }
+}

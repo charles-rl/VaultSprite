@@ -40,6 +40,7 @@ physics:
 
 context:
   poll_ms: 5000                  # foreground-title polling cadence
+  unknown_decay_polls: 6         # consecutive no-match polls (~30s) before context decays to UNKNOWN instead of sticking to the last bucket
   # substring-matched (case-insensitive) against the foreground window title.
   # "visual studio" + "studio code" cover both VS Code and VSCodium-style titles.
   work_keywords: [vs code, visual studio, studio code, terminal, obsidian, pycharm, intellij, sublime, notepad++, word, excel, slack, teams]
@@ -74,3 +75,15 @@ health:
   nudge_tick_ms: 5000        # WorkTimer tick cadence
   volume: { step: 0.7, chirp: 1.0, yawn: 0.8 }
   sounds_dir: assets/sounds
+
+debug:                       # flip to false once troubleshooting is done (no code changes needed)
+  vault_logging: true        # rolling trail in <vault>/Memory/Debug/{pet-states,context}.md (title+bucket on change)
+  telemetry_overlay: true    # live on-screen telemetry window (coords, behavior, frame index)
+
+mascot:                      # M9 behavior engine — plays assets/steve_shimeji directly (Shimeji XML)
+  enabled: true              # when on, the Shimeji engine drives ambient animation + position; off = legacy GIF FSM
+  actions_xml: assets/steve_shimeji/conf/actions.xml
+  behaviors_xml: assets/steve_shimeji/conf/behaviors.xml
+  tick_ms: 40                # Shimeji action clock (~25 ticks/s, matches their Duration units)
+  time_scale: 1.0            # multiplies pose durations (Shijima's userScale plumbing): <1 = livelier pet
+  excluded_behaviors: [SplitIntoTwo, PullUpShimeji]   # solo-pet: breeding/divide stay off (frames 37-46 kept for later)

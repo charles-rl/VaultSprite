@@ -1,0 +1,167 @@
+package com.group_finity.mascot.action;
+
+import com.group_finity.mascot.Main;
+import com.group_finity.mascot.Mascot;
+import com.group_finity.mascot.animation.Animation;
+import com.group_finity.mascot.behavior.BehaviorExecutionException;
+import com.group_finity.mascot.config.BehaviorInstantiationException;
+import com.group_finity.mascot.script.VariableException;
+import com.group_finity.mascot.script.VariableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.ResourceBundle;
+
+/**
+ * Multiplying action.
+ *
+ * @author Yuki Yamada
+ * @author Shimeji-ee Group
+ */
+public class Breed extends Animate {
+    private static final Logger log = LoggerFactory.getLogger(Breed.class);
+
+    // thanks to LavenderSnek for the idea for this delegate, cleans up the breeding code nicely
+    static class Delegate {
+        private static final String PARAMETER_BORNX = "BornX";
+        private static final int DEFAULT_BORNX = 0;
+
+        private static final String PARAMETER_BORNY = "BornY";
+        private static final int DEFAULT_BORNY = 0;
+
+        private static final String PARAMETER_BORNBEHAVIOR = "BornBehaviour";
+        private static final String DEFAULT_BORNBEHAVIOR = "";
+
+        private static final String PARAMETER_BORNMASCOT = "BornMascot";
+        private static final String DEFAULT_BORNMASCOT = "";
+
+        private static final String PARAMETER_BORNTRANSIENT = "BornTransient";
+        private static final boolean DEFAULT_BORNTRANSIENT = false;
+
+        private static final String PARAMETER_BORNINTERVAL = "BornInterval";
+        private static final int DEFAULT_BORNINTERVAL = 1;
+
+        private static final String PARAMETER_BORNCOUNT = "BornCount";
+        private static final int DEFAULT_BORNCOUNT = 1;
+
+        private final ActionBase action;
+        private double scaling;
+
+        Delegate(ActionBase action) {
+            this.action = action;
+        }
+
+        void initScaling() {
+            scaling = Main.getInstance().getSettings().scaling;
+        }
+
+        boolean isEnabled() throws VariableException {
+            return isBornTransient() ?
+                    Main.getInstance().getSettings().transients :
+                    Main.getInstance().getSettings().breeding;
+        }
+
+        boolean isIntervalFrame() throws VariableException {
+            return action.getTime() % getBornInterval() == 0;
+        }
+
+        boolean isPenultimateFrame() throws VariableException {
+            return action.getTime() == action.getAnimation().getDuration() - 1;
+        }
+
+        void breed() throws VariableException {
+            String childType = Main.getInstance().getConfiguration(getBornMascot()) != null ? getBornMascot() : action.getMascot().getImageSet();
+
+            for (int index = 0; index < getBornCount(); index++) {
+                // Create a mascot
+                final Mascot newMascot = new Mascot(childType);
+
+                log.info("Breed Mascot ({},{},{})", action.getMascot(), action, newMascot);
+
+                // Start outside the range
+                if (action.getMascot().isLookRight()) {
+                    newMascot.getAnchor().setLocation(action.getMascot().getAnchor().x - (int) Math.round(getBornX() * scaling),
+                            action.getMascot().getAnchor().y + (int) Math.round(getBornY() * scaling));
+                } else {
+                    newMascot.getAnchor().setLocation(action.getMascot().getAnchor().x + (int) Math.round(getBornX() * scaling),
+                            action.getMascot().getAnchor().y + (int) Math.round(getBornY() * scaling));
+                }
+                newMascot.setLookRight(action.getMascot().isLookRight());
+
+                try {
+                    newMascot.setBehavior(Main.getInstance().getConfiguration(childType).buildBehavior(getBornBehavior(), action.getMascot()));
+                    action.getMascot().getManager().add(newMascot);
+                } catch (final BehaviorInstantiationException | BehaviorExecutionException e) {
+                    log.error("Failed to create mascot \"{}\" with behavior \"{}\"", newMascot, getBornBehavior(), e);
+                    Main.showError(Main.getInstance().getLanguageBundle().getString("FailedCreateNewShimejiErrorMessage"), e);
+                    newMascot.dispose();
+                }
+            }
+        }
+
+        void validateBornCount() throws VariableException {
+            if (getBornCount() < 1) {
+                throw new VariableException("BornCount must be positive");
+            }
+        }
+
+        void validateBornInterval() throws VariableException {
+            if (getBornInterval() < 1) {
+                throw new VariableException("BornInterval must be positive");
+            }
+        }
+
+        private int getBornX() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNX), Number.class, DEFAULT_BORNX).intValue();
+        }
+
+        private int getBornY() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNY), Number.class, DEFAULT_BORNY).intValue();
+        }
+
+        private String getBornBehavior() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNBEHAVIOR), String.class, DEFAULT_BORNBEHAVIOR);
+        }
+
+        private String getBornMascot() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNMASCOT), String.class, DEFAULT_BORNMASCOT);
+        }
+
+        private boolean isBornTransient() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNTRANSIENT), Boolean.class, DEFAULT_BORNTRANSIENT);
+        }
+
+        private int getBornInterval() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNINTERVAL), Number.class, DEFAULT_BORNINTERVAL).intValue();
+        }
+
+        private int getBornCount() throws VariableException {
+            return action.eval(action.getSchema().getString(PARAMETER_BORNCOUNT), Number.class, DEFAULT_BORNCOUNT).intValue();
+        }
+    }
+
+    private final Delegate delegate = new Delegate(this);
+
+    public Breed(ResourceBundle schema, final List<Animation> animations, final VariableMap context) {
+        super(schema, animations, context);
+    }
+
+    @Override
+    public void init(final Mascot mascot) throws VariableException {
+        super.init(mascot);
+
+        delegate.initScaling();
+        delegate.validateBornCount();
+    }
+
+    @Override
+    protected void tick() throws LostGroundException, VariableException {
+        super.tick();
+
+        if (delegate.isPenultimateFrame() && delegate.isEnabled()) {
+            // Multiply
+            delegate.breed();
+        }
+    }
+}

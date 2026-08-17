@@ -1,0 +1,209 @@
+package com.group_finity.mascot.image;
+
+import hqx.Hq2x;
+import hqx.Hq3x;
+import hqx.Hq4x;
+
+import java.awt.*;
+import java.awt.image.BufferedImage;
+
+/**
+ * A collection of methods for transforming images.
+ *
+ * @author Yuki Yamada
+ * @author Shimeji-ee Group
+ * @author DalekCraft
+ */
+public final class ImageUtils {
+    private ImageUtils() {
+        throw new UnsupportedOperationException("ImageUtils is a static class and cannot be instantiated");
+    }
+
+    /**
+     * Creates a copy of the given image that is optimized for the system's default graphics configuration.
+     * If the given image is already optimized, it is returned unchanged.
+     *
+     * @param src the image to optimize
+     * @return a copy of the original image that is compatible with the default graphics configuration, or {@code src}
+     * if the image was already optimized
+     */
+    public static BufferedImage toCompatibleImage(BufferedImage src) {
+        if (src == null) {
+            return null;
+        }
+
+        GraphicsConfiguration graphicsConfig = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice().getDefaultConfiguration();
+
+        if (src.getColorModel().equals(graphicsConfig.getColorModel())) {
+            return src;
+        }
+
+        BufferedImage compatible = graphicsConfig.createCompatibleImage(src.getWidth(), src.getHeight(), src.getTransparency());
+        Graphics2D g2d = compatible.createGraphics();
+        g2d.drawImage(src, 0, 0, null);
+        g2d.dispose();
+
+        return compatible;
+    }
+
+    /**
+     * Creates an image with the specified dimensions.
+     * The image will be optimized for the system's default graphics configuration.
+     *
+     * @param width the width of the returned image
+     * @param height the height of the returned image
+     * @return an image compatible with the default graphics configuration
+     */
+    public static BufferedImage createCompatibleImage(int width, int height) {
+        GraphicsConfiguration graphicsConfig = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice().getDefaultConfiguration();
+        return graphicsConfig.createCompatibleImage(width, height);
+    }
+
+    /**
+     * Creates an image with the specified dimensions and transparency mode.
+     * The image will be optimized for the system's default graphics configuration.
+     *
+     * @param width the width of the returned image
+     * @param height the height of the returned image
+     * @param transparency the specified transparency mode
+     * @return an image compatible with the default graphics configuration
+     * @see Transparency#OPAQUE
+     * @see Transparency#BITMASK
+     * @see Transparency#TRANSLUCENT
+     */
+    public static BufferedImage createCompatibleImage(int width, int height, int transparency) {
+        GraphicsConfiguration graphicsConfig = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice().getDefaultConfiguration();
+        return graphicsConfig.createCompatibleImage(width, height, transparency);
+    }
+
+    /**
+     * Flips the given image horizontally.
+     *
+     * @param src the image to flip horizontally
+     * @return a horizontally flipped copy of the original image
+     */
+    public static BufferedImage flip(final BufferedImage src) {
+        if (src == null) {
+            return null;
+        }
+
+        final BufferedImage copy = createCompatibleImage(src.getWidth(), src.getHeight(), src.getTransparency());
+
+        for (int y = 0; y < src.getHeight(); y++) {
+            for (int x = 0; x < src.getWidth(); x++) {
+                copy.setRGB(copy.getWidth() - x - 1, y, src.getRGB(x, y));
+            }
+        }
+        return copy;
+    }
+
+    /**
+     * Premultiplies the given image using the specified opacity.
+     * If the specified opacity is 1.0, the image is returned unchanged.
+     *
+     * @param source the image to premultiply
+     * @param opacity the opacity factor by which to premultiply the image
+     * @return a premultiplied copy of the original image, or {@code source} if {@code opacity} is 1.0
+     */
+    public static BufferedImage premultiply(final BufferedImage source, final double opacity) {
+        if (source == null) {
+            return null;
+        }
+        if (opacity == 1.0) {
+            return source;
+        }
+
+        // Opacity is guaranteed to not be 1, so set transparency mode of new image to translucent
+        final BufferedImage returnImage = createCompatibleImage(source.getWidth(), source.getHeight(), Transparency.TRANSLUCENT);
+        int rgb;
+        int a;
+        double opacityFactor;
+        int r;
+        int g;
+        int b;
+
+        for (int y = 0; y < returnImage.getHeight(); y++) {
+            for (int x = 0; x < returnImage.getWidth(); x++) {
+                rgb = source.getRGB(x, y);
+                a = (rgb & 0xFF000000) >>> 24;
+                opacityFactor = a / 255.0 * opacity;
+                a = (int) (a * opacity);
+                r = (int) (((rgb & 0x00FF0000) >>> 16) * opacityFactor);
+                g = (int) (((rgb & 0x0000FF00) >>> 8) * opacityFactor);
+                b = (int) ((rgb & 0x000000FF) * opacityFactor);
+                returnImage.setRGB(x, y, a << 24 | r << 16 | g << 8 | b);
+            }
+        }
+
+        return returnImage;
+    }
+
+    /**
+     * Scales the given image using the specified scale factor and filter.
+     *
+     * @param source the image to premultiply
+     * @param scaling the factor by which to scale the image
+     * @param filter the filter to use when scaling the image
+     * @return a scaled copy of the original image
+     */
+    public static BufferedImage scale(final BufferedImage source, final double scaling, Filter filter) {
+        if (source == null) {
+            return null;
+        }
+
+        int width = source.getWidth();
+        int height = source.getHeight();
+        BufferedImage workingImage = null;
+
+        // apply hqx if applicable
+        double effectiveScaling = scaling;
+        if (filter == Filter.HQX && scaling > 1) {
+            int hqxType = 0;
+            if (effectiveScaling % 4 == 0)
+                hqxType = 4;
+            else if (effectiveScaling % 3 == 0)
+                hqxType = 3;
+            else if (effectiveScaling % 2 == 0)
+                hqxType = 2;
+
+            if (hqxType == 0) {
+                filter = Filter.NEAREST_NEIGHBOUR;
+            } else {
+                int[] srcBuffer = source.getRGB(0, 0, width, height, null, 0, width);
+                int newWidth = width * hqxType;
+                int newHeight = height * hqxType;
+                int[] dstBuffer = new int[newWidth * newHeight];
+                switch (hqxType) {
+                    case 4 -> Hq4x.scale4(srcBuffer, dstBuffer, width, height);
+                    case 3 -> Hq3x.scale3(srcBuffer, dstBuffer, width, height);
+                    case 2 -> Hq2x.scale2(srcBuffer, dstBuffer, width, height);
+                }
+
+                effectiveScaling /= hqxType;
+                width = newWidth;
+                height = newHeight;
+                workingImage = createCompatibleImage(width, height, Transparency.TRANSLUCENT);
+                workingImage.setRGB(0, 0, width, height, dstBuffer, 0, width);
+            }
+        }
+
+        if (effectiveScaling != 1) {
+            width = (int) Math.round(width * effectiveScaling);
+            height = (int) Math.round(height * effectiveScaling);
+        }
+
+        final BufferedImage copy = createCompatibleImage(width, height, workingImage != null ? Transparency.TRANSLUCENT : source.getTransparency());
+
+        Graphics2D g2d = copy.createGraphics();
+        Object renderHint = filter == Filter.BICUBIC
+                ? RenderingHints.VALUE_INTERPOLATION_BICUBIC
+                : RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR;
+
+        g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, renderHint);
+        g2d.drawImage(workingImage != null ? workingImage : source, 0, 0, width, height, null);
+
+        g2d.dispose();
+
+        return copy;
+    }
+}

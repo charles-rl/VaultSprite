@@ -1,0 +1,265 @@
+package com.group_finity.mascot.action;
+
+import com.group_finity.mascot.Main;
+import com.group_finity.mascot.Mascot;
+import com.group_finity.mascot.animation.Animation;
+import com.group_finity.mascot.behavior.BehaviorExecutionException;
+import com.group_finity.mascot.config.BehaviorInstantiationException;
+import com.group_finity.mascot.script.VariableException;
+import com.group_finity.mascot.script.VariableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.ref.WeakReference;
+import java.util.List;
+import java.util.ResourceBundle;
+
+/**
+ * @author Kilkakon
+ * @since 1.0.21.3
+ */
+public class ComplexMove extends BorderedAction {
+    private static final Logger log = LoggerFactory.getLogger(ComplexMove.class);
+
+    private final Breed.Delegate delegate = new Breed.Delegate(this);
+
+    private static final String PARAMETER_CHARACTERISTICS = "Characteristics";
+    private static final String DEFAULT_CHARACTERISTICS = "";
+
+    private static final String PARAMETER_BEHAVIOR = "Behaviour";
+    private static final String DEFAULT_BEHAVIOR = "";
+
+    private static final String PARAMETER_TARGETBEHAVIOR = "TargetBehaviour";
+    private static final String DEFAULT_TARGETBEHAVIOR = "";
+
+    private static final String PARAMETER_TARGETLOOK = "TargetLook";
+    private static final boolean DEFAULT_TARGETLOOK = false;
+
+    private static final String PARAMETER_TARGETX = "TargetX";
+    private static final int DEFAULT_TARGETX = Integer.MAX_VALUE;
+
+    private static final String PARAMETER_TARGETY = "TargetY";
+    private static final int DEFAULT_TARGETY = Integer.MAX_VALUE;
+
+    private WeakReference<Mascot> target;
+
+    private Boolean hasTurning = null;
+
+    private boolean turning = false;
+
+    private boolean breedEnabled = false;
+
+    private boolean scanEnabled = false;
+
+    public ComplexMove(ResourceBundle schema, final List<Animation> animations, final VariableMap context) {
+        super(schema, animations, context);
+    }
+
+    @Override
+    public void init(final Mascot mascot) throws VariableException {
+        super.init(mascot);
+
+        if (!getCharacteristics().isEmpty()) {
+            for (String characteristic : getCharacteristics().split(",")) {
+                if (characteristic.equals(getSchema().getString("Breed"))) {
+                    breedEnabled = true;
+                } else if (characteristic.equals(getSchema().getString("Scan"))) {
+                    scanEnabled = true;
+                }
+            }
+        }
+
+        if (breedEnabled) {
+            delegate.initScaling();
+            delegate.validateBornCount();
+            delegate.validateBornInterval();
+        }
+        if (scanEnabled) {
+            // cannot broadcast while scanning for an affordance
+            getMascot().getAffordances().clear();
+
+            if (getMascot().getManager() != null) {
+                target = getMascot().getManager().getMascotWithAffordance(getAffordance());
+            }
+            Mascot targetMascot = target == null ? null : target.get();
+            putVariable(getSchema().getString("TargetX"), targetMascot != null ? targetMascot.getAnchor().x : null);
+            putVariable(getSchema().getString("TargetY"), targetMascot != null ? targetMascot.getAnchor().y : null);
+        }
+    }
+
+    @Override
+    public boolean hasNext() throws VariableException {
+        if (!super.hasNext()) {
+            return false;
+        }
+
+        if (turning) {
+            return true;
+        }
+
+        if (scanEnabled) {
+            if (getMascot().getManager() == null) {
+                return true;
+            }
+
+            Mascot targetMascot = target == null ? null : target.get();
+            return targetMascot != null && targetMascot.getAffordances().contains(getAffordance());
+        } else {
+            final int targetX = getTargetX();
+            final int targetY = getTargetY();
+
+            /* Return true if the mascot has not reached the position (TargetX, TargetY).
+            If TargetX has its default value, we only check the mascot's y-coordinate,
+            and if TargetY has its default value, we only check the mascot's x-coordinate.
+            If both TargetX and TargetY have their default values, return false. */
+            return targetX != DEFAULT_TARGETX && getMascot().getAnchor().x != targetX ||
+                    targetY != DEFAULT_TARGETY && getMascot().getAnchor().y != targetY;
+        }
+    }
+
+    @Override
+    protected void tick() throws LostGroundException, VariableException {
+        super.tick();
+
+        if (scanEnabled) {
+            // cannot broadcast while scanning for an affordance
+            getMascot().getAffordances().clear();
+        }
+
+        if (getBorder() != null && !getBorder().isOn(getMascot().getAnchor())) {
+            throw new LostGroundException("Mascot is not on border");
+        }
+
+        int targetX;
+        int targetY;
+
+        Mascot targetMascot = target == null ? null : target.get();
+        if (scanEnabled) {
+            if (targetMascot == null) {
+                return;
+            }
+
+            targetX = targetMascot.getAnchor().x;
+            targetY = targetMascot.getAnchor().y;
+
+            putVariable(getSchema().getString("TargetX"), targetX);
+            putVariable(getSchema().getString("TargetY"), targetY);
+        } else {
+            targetX = getTargetX();
+            targetY = getTargetY();
+        }
+
+        if (getMascot().getAnchor().x != targetX) {
+            // Activate turning animation if we change directions
+            turning = hasTurningAnimation() && (turning || getMascot().getAnchor().x < targetX != getMascot().isLookRight());
+            getMascot().setLookRight(getMascot().getAnchor().x < targetX);
+        }
+        boolean down = getMascot().getAnchor().y < targetY;
+
+        // Check whether turning animation has finished
+        Animation animation = getAnimation();
+        if (turning && getTime() >= animation.getDuration()) {
+            turning = false;
+            animation = getAnimation();
+        }
+
+        // Animate
+        animation.apply(getMascot(), getTime());
+
+        if (targetX != DEFAULT_TARGETX || scanEnabled) {
+            // If we went past the target, set ourselves to the target position
+            if (getMascot().isLookRight() && getMascot().getAnchor().x >= targetX ||
+                    !getMascot().isLookRight() && getMascot().getAnchor().x <= targetX) {
+                getMascot().getAnchor().x = targetX;
+            }
+        }
+        if (targetY != DEFAULT_TARGETY || scanEnabled) {
+            // If we went past the target, set ourselves to the target position
+            if (down && getMascot().getAnchor().y >= targetY ||
+                    !down && getMascot().getAnchor().y <= targetY) {
+                getMascot().getAnchor().y = targetY;
+            }
+        }
+
+        if (breedEnabled && delegate.isIntervalFrame() && !turning && delegate.isEnabled()) {
+            // Multiply
+            delegate.breed();
+        }
+
+        if (!turning && getMascot().getAnchor().x == targetX && getMascot().getAnchor().y == targetY) {
+            boolean setFirstBehavior = false;
+            try {
+                getMascot().setBehavior(Main.getInstance().getConfiguration(getMascot().getImageSet()).buildBehavior(getBehavior(), getMascot()));
+                setFirstBehavior = true;
+                if (targetMascot != null) {
+                    targetMascot.setBehavior(Main.getInstance().getConfiguration(targetMascot.getImageSet()).buildBehavior(getTargetBehavior(), targetMascot));
+                    if (isTargetLook() && targetMascot.isLookRight() == getMascot().isLookRight()) {
+                        targetMascot.setLookRight(!getMascot().isLookRight());
+                    }
+                }
+            } catch (final BehaviorInstantiationException | BehaviorExecutionException e) {
+                String behaviorParam = setFirstBehavior ? getTargetBehavior() : getBehavior();
+                Mascot mascotParam = setFirstBehavior ? targetMascot : getMascot();
+                log.error("Failed to set behavior to \"{}\" for mascot \"{}\"", behaviorParam, mascotParam, e);
+                Main.showError(String.format(Main.getInstance().getLanguageBundle().getString("FailedSetBehaviourErrorMessage"), behaviorParam, mascotParam), e);
+            }
+        }
+    }
+
+    @Override
+    protected Animation getAnimation() throws VariableException {
+        // had to expose both animations and variables for this
+        // is there a better way?
+        List<Animation> animations = getAnimations();
+        if (!animations.isEmpty()) {
+            getVariableLock().readLock().lock();
+            try {
+                for (Animation animation : animations) {
+                    if (turning == animation.isTurn() &&
+                            animation.isEffective(getVariables())) {
+                        return animation;
+                    }
+                }
+            } finally {
+                getVariableLock().readLock().unlock();
+            }
+        }
+
+        return null;
+    }
+
+    protected boolean hasTurningAnimation() {
+        if (hasTurning == null) {
+            hasTurning = !getAnimations().isEmpty() && getAnimations().stream().anyMatch(Animation::isTurn);
+        }
+        return hasTurning;
+    }
+
+    protected boolean isTurning() {
+        return turning;
+    }
+
+    private String getCharacteristics() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_CHARACTERISTICS), String.class, DEFAULT_CHARACTERISTICS);
+    }
+
+    private String getBehavior() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_BEHAVIOR), String.class, DEFAULT_BEHAVIOR);
+    }
+
+    private String getTargetBehavior() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_TARGETBEHAVIOR), String.class, DEFAULT_TARGETBEHAVIOR);
+    }
+
+    private boolean isTargetLook() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_TARGETLOOK), Boolean.class, DEFAULT_TARGETLOOK);
+    }
+
+    private int getTargetX() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_TARGETX), Number.class, DEFAULT_TARGETX).intValue();
+    }
+
+    private int getTargetY() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_TARGETY), Number.class, DEFAULT_TARGETY).intValue();
+    }
+}

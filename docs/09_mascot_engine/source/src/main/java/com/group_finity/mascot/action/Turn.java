@@ -1,0 +1,50 @@
+package com.group_finity.mascot.action;
+
+import com.group_finity.mascot.animation.Animation;
+import com.group_finity.mascot.script.VariableException;
+import com.group_finity.mascot.script.VariableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.ResourceBundle;
+
+/**
+ * @author Kilkakon
+ * @since 1.0.8
+ */
+public class Turn extends BorderedAction {
+    private static final Logger log = LoggerFactory.getLogger(Turn.class);
+
+    private static final String PARAMETER_LOOKRIGHT = "LookRight";
+
+    private boolean turning = false;
+
+    public Turn(ResourceBundle schema, final List<Animation> animations, final VariableMap context) {
+        super(schema, animations, context);
+    }
+
+    @Override
+    public boolean hasNext() throws VariableException {
+        // TODO: Consider setting this variable in init() or tick() instead of hasNext()
+        turning = turning || isLookRight() != getMascot().isLookRight();
+        return super.hasNext() && turning && getTime() < getAnimation().getDuration();
+    }
+
+    @Override
+    protected void tick() throws LostGroundException, VariableException {
+        getMascot().setLookRight(isLookRight());
+
+        super.tick();
+
+        if (getBorder() != null && !getBorder().isOn(getMascot().getAnchor())) {
+            throw new LostGroundException("Mascot is not on border");
+        }
+
+        getAnimation().apply(getMascot(), getTime());
+    }
+
+    private boolean isLookRight() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_LOOKRIGHT), Boolean.class, !getMascot().isLookRight());
+    }
+}

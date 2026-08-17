@@ -111,6 +111,18 @@ n### Module 1: Transparent GUI & Drag Overlay
 
 ---
 
+### Module 9: Mascot Behavior Engine (Shimeji-compatible) — added 2026-08-17
+
+* **Target Repo / Reference:** `https://github.com/DalekCraft2/Shimeji-Desktop` (canonical Shimeji-ee, JDK 25, New-BSD/zlib; supersedes `pixelomer/Shijima-Qt`/`libshijima`; cloned then deleted after extraction — patterns only)
+* **Core Feature:** Plays standard Shimeji community packs (this repo ships one: `assets/steve_shimeji/`) natively in Python: parses `actions.xml` + `behaviors.xml`, runs the weighted behavior roulette with per-tick pose animation over raw PNG frames, and evaluates `${...}`(once)/`#{...}`(per-tick) conditions.
+* **Files/Functions to Inspect:** see `docs/09_mascot_engine/README.md` (+ verbatim Java under its `source/`) — environment borders (`is_on` tol 1.0 px), the manager's 4-level tick-recovery ladder (normal → Fall → detach-from-borders → reset-position), behavior roulette (Frequency weights, Hidden, NextBehavior Add semantics), action types (Stay/Move/Animate + Sequence/Select; embedded Jump/Fall/Dragged/Look/Offset), `${}`-vs-`#{}` expression timing.
+* **Extraction Objective:**
+* Reimplement the action runners + environment as a pure-Python `MascotCore` (unit-testable, no Qt) driven by a `QTimer`; App forces external behaviors (drag → Dragged, flick → Thrown, drop/stats/vision/health), engine runs ambient roulette.
+* PNG frames decoded single-read per file via QImageReader into a QPixmap cache (this PySide6 build's only image quirk is animated-GIF multi-frame iteration; discrete files are reliable). No sprite compiler — asset paths point straight at `assets/steve_shimeji/img/Steve/*.png`.
+* Solo-pet: Breed/SelfDestruct/Scan/Broadcast action types parsed but treated as no-op advances; Breed-only frames 38–46 are repurposed as visual-only gags (the PullUp/Divide flourish plays without spawning a second pet) so every frame in the pack renders. Solo pet is a documented constraint, not a bug.
+
+---
+
 ### System Architecture Flow
 
 ```

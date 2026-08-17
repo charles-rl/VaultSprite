@@ -239,6 +239,27 @@ class ObsidianVault(QObject):
         self.check_storage()                          # post-write size audit (never raises)
         return target
 
+    def append_debug_log(self, category: str, entry: str) -> Path:
+        """Append a timestamped line to ``Memory/Debug/{category}.md``.
+
+        Rolling debug trail for diagnosing user-reported issues (context switches,
+        FSM transitions, physics events). Files roll daily by appending — the same
+        atomic RMW as the journal but without its frontmatter contract."""
+        with self._lock:
+            day = self._today()
+            stamp = datetime.now().strftime("%H:%M:%S")
+            path = self.root / "Memory" / "Debug" / f"{_slugify(category)}-{day}.md"
+            target = self._resolve_safe(path)         # may raise PermissionError
+            existing = "" if not target.exists() else target.read_text(encoding="utf-8")
+            text = (existing.rstrip("\n") + ("\n" if existing.strip() else "")
+                    + f"- [{stamp}] {entry.strip()}\n")
+            tmp = target.with_name(f".{target.name}.tmp")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(target)                        # atomic rename
+        self.check_storage()                          # post-write size audit (never raises)
+        return target
+
     def append_journal(self, entry: str) -> Path:
         """Append a timestamped line to ``Journal/YYYY-MM-DD.md`` (atomic RMW)."""
         with self._lock:

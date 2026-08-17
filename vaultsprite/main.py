@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer
@@ -28,11 +29,12 @@ from .animation_fsm import AnimationFSM, StateTransition
 from .config import Config, load_config
 from .context_detector import CONTEXT_PLAY, ContextDetector
 from .health_audio import SoundBank, WorkTimer
+from .mascot_engine_widget import MascotEngine
 from .obsidian_vault import ObsidianVault
 from .remote_agent import RemoteAgent
 from .stat_engine import StatEngine
 from .terrain_physics import TerrainPhysics
-from .ui_overlay import PetOverlayWindow
+from .ui_overlay import PetOverlayWindow, SystemTray, TelemetryOverlay
 
 logger = logging.getLogger("vaultsprite")
 
@@ -54,6 +56,8 @@ class App(QObject):
         self.vault = ObsidianVault(config)
         self.sounds = SoundBank(config)
         self.health = WorkTimer(config)
+        self._mascot_on = bool(config.get("mascot.enabled", False))
+        self.mascot = MascotEngine(config, parent=self) if self._mascot_on else None
 
         # keep the terrain callbacks pointed at the live window geometry
         self.physics.set_mover(
@@ -63,13 +67,14 @@ class App(QObject):
         )
         self.agent.set_overlay_winid(self.window.winId())
         self._context_now: str = "UNKNOWN"
+        self._prev_context: str = "UNKNOWN"
 
         # --- wiring ------------------------------------------------------------
         w = self.window
         w.drag_released.connect(self._on_drag_released)
         w.drag_started.connect(self._on_drag_started)
         w.clicked.connect(self._on_pet_clicked)
-        w.ask_vision_requested.connect(lambda p: self.agent.ask(p, window_context=self._context_now))
+        w.ask_vision_requested.connect(lambda p: self.agent.ask(p, window_context=self._vision_window_context()))
         w.stretch_requested.connect(self._trigger_stretch_nudge)
 
         player = w.player
@@ -87,6 +92,15 @@ class App(QObject):
         self.context.context_changed.connect(self._on_context_changed)
 
         self.health.stretch_nudge.connect(self._trigger_stretch_nudge)
+
+        if self.mascot is not None:
+            self.mascot.frame_changed.connect(self.window.render_mascot_frame)
+            self.mascot.position_changed.connect(self.window.move_to)
+            self.mascot.behavior_changed.connect(self._on_mascot_behavior)
+            self._setup_tray()
+            if bool(self.config.get("debug.telemetry_overlay", False)):
+                self._overlay = TelemetryOverlay()
+                self._overlay.start(self._mascot_telemetry)
 
         self.agent.response_ready.connect(self._on_agent_reply)
         self.agent.error.connect(
@@ -107,11 +121,14 @@ class App(QObject):
 
     # -- lifecycle --------------------------------------------------------------
     def start(self):
-        logger.info("starting VaultSprite (model=%s, vault=%s)",
-                    self.agent.model, self.vault.root)
-        t = self.fsm.force_state(self.fsm.current_state)
-        self.window.play_state(t)
-        self.physics.start()
+        logger.info("starting VaultSprite (model=%s, vault=%s, mascot=%s)",
+                    self.agent.model, self.vault.root, self._mascot_on)
+        if self._mascot_on and self.mascot is not None:
+            self.mascot.start()       # M9 owns ambient animation + position
+        else:
+            t = self.fsm.force_state(self.fsm.current_state)
+            self.window.play_state(t)
+            self.physics.start()
         self.stats.start()
         self.context.start()          # no-ops on Linux (pwc unavailable); still fine
         self.health.start()
@@ -139,6 +156,23 @@ class App(QObject):
             size_bytes / 1048576, self.vault.root)
 
     def shutdown(self):
+        if self.mascot is not None:
+            try:
+                self.mascot.stop()
+            except Exception as exc:  # pragma: no cover
+                logger.debug("mascot stop failed: %s", exc)
+        overlay = getattr(self, "_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.close()
+            except Exception:  # pragma: no cover
+                pass
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            try:
+                tray.hide()
+            except Exception:  # pragma: no cover
+                pass
         for stopper in (self._size_timer.stop, self._vision_timer.stop, self.physics.stop,
                         self.stats.stop, self.context.stop, self.health.stop):
             try:
@@ -148,9 +182,25 @@ class App(QObject):
 
     # -- animation ownership (the single FSM driver) -------------------------------
     def _play(self, transition: StateTransition):
+        self._log_state_transition(transition)   # every state change funnels through here
         self.window.play_state(transition)
         if transition.name == "walking":
             pass  # per-frame walk drift handled by SpritePlayer.position_delta → window
+
+    def _debug_log(self, category: str, entry: str):
+        """Best-effort rolling debug trail in the Vault (user-facing debugging aid)."""
+        if not self.config.get("debug.vault_logging", True):
+            return
+        try:
+            self.vault.append_debug_log(category, entry)
+        except Exception as exc:  # pragma: no cover - never break the pet over logging
+            logger.debug("vault debug log failed: %s", exc)
+
+    def _log_state_transition(self, transition: StateTransition):
+        x, y = self.window.position()
+        self._debug_log(
+            "pet-states",
+            f"state -> {transition.name} (dur={int(getattr(transition,'duration_ms',0))}ms, pos=({x},{y}))")
 
     def _advance_fsm(self, _finished_name: str = ""):
         """Current state's hold elapsed → draw the next weighted state."""
@@ -161,6 +211,9 @@ class App(QObject):
     def _on_drag_started(self):
         self.physics.enable(False)     # freeze gravity while held
         self.stats.pause()             # don't decay mid-interaction
+        if self.mascot is not None:
+            self.mascot.set_dragging(True)
+            self.mascot.force_behavior("Dragged")
 
     def _on_pet_clicked(self):
         """Petting: a little energy + a friendly blip."""
@@ -172,7 +225,12 @@ class App(QObject):
         """Drag ended (flick or plain drop). The window already cleared its own
         dragging flag; physics decides between an impulse and a natural fall."""
         self.stats.resume()
-        self.physics.release(vx, vy)
+        if self.mascot is not None:
+            self.mascot.set_dragging(False)
+            self.mascot.inject_throw(vx, vy)
+            self.mascot.force_behavior("Thrown")
+        else:
+            self.physics.release(vx, vy)
 
     # -- terrain events (M4 -> M2/M1) -----------------------------------------------
     def _on_falling_started(self):
@@ -204,17 +262,25 @@ class App(QObject):
     # -- context (M5 -> stats/health/memory) -------------------------------------------
     def _on_context_changed(self, context: str):
         self._context_now = context
-        if context == CONTEXT_PLAY:
-            self.stats.set_active(False)     # decay pauses in play
+        if context == CONTEXT_PLAY or context == "UNKNOWN":
+            # PLAY and decayed-UNKNOWN both stop crediting "work" — the old code kept
+            # WORK active on UNKNOWN, which is why stretch nudges fired while idle.
+            self.stats.set_active(False)     # decay pauses in play / unknown
             self.health.set_active(False)    # and the work clock resets
         elif context == "WORK":
             self.stats.set_active(True)
             self.health.set_active(True)
-        else:                                # UNKNOWN → keep last-known (already set above)
-            pass
-        logger.info("context -> %s", context)
+        title = (getattr(self.context, "last_title", "") or "").strip()
+        logger.info("context -> %s (title=%r)", context, title[:60])
+        self._debug_log("context", f"{self._prev_context or 'UNKNOWN'} -> {context} | title={title!r}")
+        self._prev_context = context
         try:
-            self.vault.record_event(f"context switched to {context}")
+            title = getattr(self.context, "last_title", "") or "?"
+            if context == "UNKNOWN":
+                self.vault.record_event(
+                    f"context decayed to UNKNOWN after {title} stopped matching keywords")
+            else:
+                self.vault.record_event(f"context switched to {context}", title=title)
         except Exception as exc:  # pragma: no cover
             logger.debug("vault event failed: %s", exc)
 
@@ -222,8 +288,11 @@ class App(QObject):
     def _trigger_stretch_nudge(self):
         if self.window.dragging or self.physics.falling:
             return     # defer if the pet is mid-air / held; re-arms next tick window
-        t = self.fsm.force_state("stretch_nudge")
-        self._play(t)
+        if self.mascot is not None:
+            self.mascot.force_behavior("SitDown")
+        else:
+            t = self.fsm.force_state("stretch_nudge")
+            self._play(t)
         self.sounds.play("chirp")
         self._say("Stretch break! Stand up and move.")
         try:
@@ -235,26 +304,76 @@ class App(QObject):
             logger.debug("vault health write failed: %s", exc)
 
     # -- remote vision (M6 -> bubble + FSM talking + memory) -----------------------------
+    def _vision_window_context(self) -> str:
+        """The REAL foreground window title for the LLM — never a bare 'WORK'/'PLAY'
+        bucket string. The old code passed self._context_now, so when no real title was
+        available the prompt said 'Active window context:\nWORK' and the model happily
+        described a window titled WORK instead of what it saw (see your Vault journal)."""
+        title = (getattr(self.context, "last_title", "") or "").strip()
+        bucket = self._context_now or "UNKNOWN"
+        if not title:
+            return f"[no foreground window title captured; detected context: {bucket}]"
+        return f"{title}  [detected context: {bucket}]"
+
     def _vision_tick(self):
         if self.window.dragging or not self.agent.enabled:
             return
         prompt = ("Look at my screen and, in one short sentence, tell me what I appear "
                   "to be doing right now.")
         logger.debug("autonomous vision ask (context=%s)", self._context_now)
-        self.agent.ask(prompt, window_context=self._context_now)
+        self.agent.ask(prompt, window_context=self._vision_window_context())
 
     def _on_agent_reply(self, text: str):
         if not (text or "").strip():
             return
         self._say(text.strip())
-        # animate the mouth for a moment while the reply shows
+        # animate the pet for a moment while the reply shows
         if not (self.window.dragging or self.physics.falling):
-            t = self.fsm.force_state("talking")
-            self._play(t)
+            if self.mascot is not None:
+                self.mascot.force_behavior("SitAndFaceMouse")
+            else:
+                t = self.fsm.force_state("talking")
+                self._play(t)
         try:
             self.vault.append_journal(f"said: {text.strip()[:120]}")
         except Exception as exc:  # pragma: no cover
             logger.debug("vault journal failed: %s", exc)
+
+    def _on_mascot_behavior(self, name: str):
+        """M9 telemetry → Vault debug trail (debug.vault_logging; default on)."""
+        x, y = self.window.position()
+        self._debug_log("mascot", f"behavior -> {name} (pos=({x},{y}))")
+
+    def _setup_tray(self):
+        icon_path = str(Path(self.config.resolve_path("assets/steve_shimeji/img/icon.png")))
+        self._tray = SystemTray(icon_path, self.mascot.behavior_names)
+        self._tray.scale_changed.connect(self._on_scale_changed)
+        self._tray.behavior_toggled.connect(self._on_behavior_toggled)
+        self._tray.quit_requested.connect(self._on_quit_requested)
+        self._tray.show()
+
+    def _on_scale_changed(self, factor: float):
+        w, h = self.window.size_px()
+        new_px = max(16, int(w * factor))
+        self.window.set_scale(factor)
+        if self.mascot is not None:
+            self.mascot._px = new_px
+
+    def _on_behavior_toggled(self, name: str, exclude: bool):
+        if self.mascot is not None:
+            self.mascot.toggle_excluded(name, exclude)
+            self._debug_log("mascot", f"exclude behavior {name}={exclude}")
+
+    def _on_quit_requested(self):
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _mascot_telemetry(self) -> dict:
+        x, y = self.window.position()
+        return {"x": x, "y": y,
+                "behavior": self.mascot.active_behavior if self.mascot else "",
+                "frame": self.mascot.current_frame() if self.mascot else ""}
 
     def _say(self, text: str):
         if not (self.window and self.window.isVisible()):

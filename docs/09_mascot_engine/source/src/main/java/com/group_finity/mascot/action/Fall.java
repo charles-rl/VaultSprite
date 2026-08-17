@@ -1,0 +1,174 @@
+package com.group_finity.mascot.action;
+
+import com.group_finity.mascot.Main;
+import com.group_finity.mascot.Mascot;
+import com.group_finity.mascot.animation.Animation;
+import com.group_finity.mascot.environment.MascotEnvironment;
+import com.group_finity.mascot.script.VariableException;
+import com.group_finity.mascot.script.VariableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.awt.*;
+import java.util.List;
+import java.util.ResourceBundle;
+
+/**
+ * Falling action.
+ *
+ * @author Yuki Yamada
+ * @author Shimeji-ee Group
+ */
+public class Fall extends ActionBase {
+    private static final Logger log = LoggerFactory.getLogger(Fall.class);
+
+    private static final String PARAMETER_INITIALVX = "InitialVX";
+    private static final int DEFAULT_INITIALVX = 0;
+
+    private static final String PARAMETER_INITIALVY = "InitialVY";
+    private static final int DEFAULT_INITIALVY = 0;
+
+    private static final String PARAMETER_RESISTANCEX = "ResistanceX";
+    private static final double DEFAULT_RESISTANCEX = 0.05;
+
+    private static final String PARAMETER_RESISTANCEY = "ResistanceY";
+    private static final double DEFAULT_RESISTANCEY = 0.1;
+
+    private static final String PARAMETER_GRAVITY = "Gravity";
+    private static final double DEFAULT_GRAVITY = 2;
+
+    private static final String VARIABLE_VELOCITYX = "VelocityX";
+
+    private static final String VARIABLE_VELOCITYY = "VelocityY";
+
+    private double velocityX;
+
+    private double velocityY;
+
+    private double modX;
+
+    private double modY;
+
+    protected double scaling;
+
+    public Fall(ResourceBundle schema, final List<Animation> animations, final VariableMap context) {
+        super(schema, animations, context);
+    }
+
+    @Override
+    public void init(final Mascot mascot) throws VariableException {
+        super.init(mascot);
+
+        scaling = Main.getInstance().getSettings().scaling;
+
+        /*
+         * FIXME: Mascots start falling much more quickly (if scaled up) or slowly (if scaled down) than they should
+         *  when released by the cursor, due to the scaling being used here. However, other things besides being thrown
+         *  use the Fall action, so I am kind of in a dilemma here.
+         *
+         * This is a hotfix that does not use scaling if the initial velocities equal the dX or dY of the cursor.
+         */
+        /* if (getInitialVx() == getEnvironment().getCursor().getDx()) {
+            velocityX = getInitialVx();
+        } else {
+            velocityX = getInitialVx() * scaling;
+        }
+        if (getInitialVy() == getEnvironment().getCursor().getDy()) {
+            velocityY = getInitialVy();
+        } else {
+            velocityY = getInitialVy() * scaling;
+        } */
+
+        velocityX = getInitialVx() * scaling;
+        velocityY = getInitialVy() * scaling;
+    }
+
+    @Override
+    public boolean hasNext() throws VariableException {
+        if (!super.hasNext()) {
+            return false;
+        }
+
+        Point anchor = getMascot().getAnchor();
+        /* Return true if the mascot is not on a floor or wall.
+        However, ignore whether the mascot is on a floor if they have upward velocity; this allows mascots to start
+        the Fall action on the ground with an upward initial velocity and not have the action be canceled immediately. */
+        return (velocityY < 0 || !getEnvironment().getFloor().isOn(anchor)) && !getEnvironment().getWall().isOn(anchor);
+    }
+
+    @Override
+    protected void tick() throws LostGroundException, VariableException {
+        final Mascot mascot = getMascot();
+        if (velocityX != 0) {
+            mascot.setLookRight(velocityX > 0);
+        }
+
+        // velocityX and velocityY were already scaled in init(), so only scale gravity here
+        velocityX = velocityX - velocityX * getResistanceX();
+        velocityY = velocityY - velocityY * getResistanceY() + getGravity() * scaling;
+
+        putVariable(getSchema().getString(VARIABLE_VELOCITYX), velocityX);
+        putVariable(getSchema().getString(VARIABLE_VELOCITYY), velocityY);
+
+        modX += velocityX % 1;
+        modY += velocityY % 1;
+
+        // Movement amount
+        final int dx = (int) Math.round(velocityX + modX);
+        final int dy = (int) Math.round(velocityY + modY);
+
+        modX %= 1;
+        modY %= 1;
+
+        int dev = Math.max(1, Math.max(Math.abs(dx), Math.abs(dy)));
+
+        final int anchorX = mascot.getAnchor().x;
+        final int anchorY = mascot.getAnchor().y;
+        final MascotEnvironment environment = getEnvironment();
+
+        OUTER:
+        for (int i = 0; i <= dev; i++) {
+            int x = anchorX + dx * i / dev;
+            int y = anchorY + dy * i / dev;
+
+            // Move mascot
+            if (dy > 0) {
+                // HACK: Windows may be moved, so check them often.
+                for (int j = -80; j <= 0; j++) {
+                    mascot.getAnchor().setLocation(x, y + j);
+                    if (environment.getFloor(true).isOn(mascot.getAnchor())) {
+                        break OUTER;
+                    }
+                }
+            } else {
+                mascot.getAnchor().setLocation(x, y);
+            }
+            if (environment.getWall(true).isOn(mascot.getAnchor())) {
+                break;
+            }
+        }
+
+        // Animate
+        getAnimation().apply(mascot, getTime());
+    }
+
+    private int getInitialVx() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_INITIALVX), Number.class, DEFAULT_INITIALVX).intValue();
+    }
+
+    private int getInitialVy() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_INITIALVY), Number.class, DEFAULT_INITIALVY).intValue();
+    }
+
+    private double getResistanceX() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_RESISTANCEX), Number.class, DEFAULT_RESISTANCEX).doubleValue();
+    }
+
+    private double getResistanceY() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_RESISTANCEY), Number.class, DEFAULT_RESISTANCEY).doubleValue();
+    }
+
+    private double getGravity() throws VariableException {
+        return eval(getSchema().getString(PARAMETER_GRAVITY), Number.class, DEFAULT_GRAVITY).doubleValue();
+    }
+}

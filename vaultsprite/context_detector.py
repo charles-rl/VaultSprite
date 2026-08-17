@@ -56,31 +56,56 @@ class ContextDetector(QObject):
         self.config = config or load_config()
         section = self.config.section("context")
         self._poll_ms = int(section.get("poll_ms", 5000))
+        # how many consecutive no-match polls before the pet stops assuming a bucket —
+        # without this, once a title matches WORK (or PLAY) and then goes to an
+        # unclassified app the context would stick forever ("always switched to work")
+        self._unknown_decay_polls = int(section.get("unknown_decay_polls", 6))
         self.work_keywords: list[str] = [str(k).lower() for k in
-                                         section.get("work_keywords", [])]
+                                          section.get("work_keywords", [])]
         self.play_keywords: list[str] = [str(k).lower() for k in
-                                         section.get("play_keywords", [])]
+                                          section.get("play_keywords", [])]
         # test seam + fallback probe
         self._probe: Callable[[], str] = probe or default_title_probe
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._current = CONTEXT_UNKNOWN
+        self._unknown_streak = 0
+        self.last_title: str = ""      # last raw foreground title (debug/vision prompts)
 
     # -- classification (pure, unit-testable) ----------------------------------
-    def classify(self, title: str) -> Optional[str]:
-        """Keyword-substring classification.
+    @staticmethod
+    def _keyword_in(low_title: str, keyword: str) -> bool:
+        """Whole-word keyword match.
 
-        Returns WORK/PLAY on a hit, or ``None`` when the title matches no
-        bucket (incl. empty titles). The poller keeps its last-known context
-        on ``None``, per the extraction doc's unknown-app rule; only an explicit
-        switch between buckets re-emits.
-        """
+        A keyword like "word" must not fire inside "world"/"broadway"; but the title's
+        own separators (spaces, dashes, colons, parens, dots — e.g. 'Visual Studio Code
+        — file.py') delimit words for us too. So: scan for the literal keyword and
+        require that no letter/digit touches either side of it."""
+        start = 0
+        while True:
+            i = low_title.find(keyword, start)
+            if i < 0:
+                return False
+            before_ok = i == 0 or not (low_title[i - 1].isalnum())
+            j = i + len(keyword)
+            after_ok = j >= len(low_title) or not (low_title[j].isalnum())
+            if before_ok and after_ok:
+                return True
+            start = i + 1
+
+    def classify(self, title: str) -> Optional[str]:
+        """Whole-word keyword classification.
+
+        Returns WORK/PLAY on a hit, ``None`` when no bucket matches (incl. empty
+        titles). Unknown apps don't clear the last-known bucket immediately — after
+        ``context.unknown_decay_polls`` consecutive unknown polls the poller emits
+        UNKNOWN instead of sticking to the old bucket forever."""
         low = (title or "").lower()
         if not low.strip():
             return None
-        is_work = any(k in low for k in self.work_keywords)
-        is_play = any(k in low for k in self.play_keywords)
+        is_work = any(self._keyword_in(low, k) for k in self.work_keywords)
+        is_play = any(self._keyword_in(low, k) for k in self.play_keywords)
         if is_work:
             return CONTEXT_WORK
         if is_play:
@@ -122,9 +147,18 @@ class ContextDetector(QObject):
             self._stop_event.wait(self._poll_ms / 1000.0)
 
     def _maybe_change(self, title: str):
+        self.last_title = (title or "").strip()     # kept for vision prompts + debug trail
         context = self.classify(title)
-        if context is None:      # unknown app → keep last-known context
+        if context is None:      # unknown app → hold, then decay after N consecutive polls
+            self._unknown_streak += 1
+            if self._current != CONTEXT_UNKNOWN and \
+                    self._unknown_streak >= self._unknown_decay_polls:
+                logger.info("context change: %s -> UNKNOWN (%d unknown polls; title=%r)",
+                            self._current, self._unknown_streak, title[:60])
+                self._current = CONTEXT_UNKNOWN     # stop assuming the old bucket forever
+                self.context_changed.emit(CONTEXT_UNKNOWN)   # queued across threads
             return
+        self._unknown_streak = 0
         if context != self._current:
             logger.info("context change: %s -> %s (title=%r)",
                         self._current, context, title[:60])

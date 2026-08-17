@@ -157,3 +157,146 @@ def test_upward_flick_clamps_at_screen_top_and_lands(world):
         ticks += 1
     assert landed, "pet never landed after an upward flick"
     assert int(min_y) >= int(geo.top()), "pet left the screen top while airborne"
+
+
+# -- P2: window-standing settle guarantees (Shijima cross-ref pass) -------------------
+
+def _fake_window(x: int, y: int, w: int = 400, hgt: int = 300):
+    return {"hwnd": 1234, "left": x, "top": y, "right": x + w, "bottom": y + hgt,
+            "title": "Fake Editor - main.py"}
+
+
+def test_drop_settles_on_window_top(world, monkeypatch):
+    """A drop whose path crosses a window top must land and rest ON the window
+    (standee recorded), not pass through to the taskbar."""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    win_y = int(geo.top()) + 200
+    monkeypatch.setattr(phys, "_get_visible_windows", lambda: [_fake_window(int(geo.left()), win_y)])
+    phys._stand_on_windows = True
+
+    vp.x = int(geo.left()) + 150            # horizontally inside the fake window
+    vp.y = win_y - 300                       # dropped well above the window top
+    landed: list[tuple[int, int]] = []
+    falls: list[int] = []
+    phys.landed.connect(lambda x, y: landed.append((x, y)))
+    phys.falling_started.connect(lambda: falls.append(1))
+
+    ticks = 0
+    while not landed and ticks < 600:
+        phys._tick()
+        ticks += 1
+    assert landed, "pet never landed on the window"
+    assert abs((landed[-1][1] + vp.h) - win_y) <= 2, "feet must rest on the window top"
+    assert phys._standee is not None and abs(phys._standee["top"] - win_y) <= 1
+
+
+def test_perched_on_window_stays_grounded(world, monkeypatch):
+    """Regression: a pet resting on a window top used to re-arm 'floating above floor'
+    every tick (floor-only check), logging falling at a fixed x and never settling.
+    The any-surface check must keep it grounded with no fall ever starting."""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    win_y = int(geo.top()) + 250
+    monkeypatch.setattr(phys, "_get_visible_windows", lambda: [_fake_window(int(geo.left()), win_y)])
+    phys._stand_on_windows = True
+
+    vp.x = int(geo.left()) + 150            # above the window's horizontal span
+    vp.y = win_y - vp.h                     # feet exactly on the window top
+    pos0 = (vp.x, vp.y)
+    falls: list[int] = []
+    phys.falling_started.connect(lambda: falls.append(1))
+
+    for _ in range(40):                     # well past a re-arm cycle
+        phys._tick()
+    assert not phys.falling, "resting on a window must not start a fall"
+    assert falls == [], f"spurious falling episodes while perched: {len(falls)}"
+    assert (vp.x, vp.y) == pos0, "perched pet must not drift or drop"
+
+
+def test_standee_loss_starts_a_real_fall_and_settles(world, monkeypatch):
+    """Regression: the standee liveness probe once read .get('rect') instead of 'hwnd',
+    and on loss it only emitted falling_started without setting _falling — so the pet
+    could sit mid-air forever. Loss must start a genuine fall that settles."""
+    import vaultsprite.terrain_physics as tp
+
+    class _Win32Dummy:                       # enables the win32-gated liveness block on Linux
+        pass
+
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    monkeypatch.setattr(tp, "_win32gui", _Win32Dummy())   # module-level gate for the re-check
+
+    win_y = int(geo.top()) + 250
+    wins = [_fake_window(int(geo.left()), win_y)]
+    monkeypatch.setattr(phys, "_get_visible_windows", lambda: list(wins))
+    phys._stand_on_windows = True
+    vp.x = int(geo.left()) + 150
+    vp.y = win_y - vp.h                     # perched on the (doomed) window top
+    phys._standee = {"top": win_y, "hwnd": 999, "title": "Doomed window"}
+
+    # liveness probe says the window is gone; sweep finds no windows either
+    monkeypatch.setattr(phys, "_check_standee_alive", lambda: False)
+
+    landed: list[tuple[int, int]] = []
+    phys.landed.connect(lambda x, y: landed.append((x, y)))
+    for _ in range(15):                     # force the 15-tick liveness re-check
+        wins.clear()                         # window vanished too → nothing to stand on
+        phys._tick()
+    assert phys.falling, "standee loss must immediately start a real fall"
+
+    ticks = 0
+    while not landed and ticks < 600:
+        phys._tick()
+        ticks += 1
+    assert landed, "pet never settled after its window vanished"
+    assert abs((landed[-1][1] + vp.h) - _floor()) <= 2, "must settle onto the work-area floor"
+
+
+def test_no_stuck_state_after_windows_appear_and_vanish(world, monkeypatch):
+    """End-to-end settle guarantee (Shijima tick-ladder spirit): a long run where tracked
+    windows appear and disappear must never leave the pet airborne-at-rest; it always
+    ends grounded — on the floor or on whatever surface is there."""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    win_y = int(geo.top()) + 250
+    wins: list[dict] = []
+    monkeypatch.setattr(phys, "_get_visible_windows", lambda: list(wins))
+    phys._stand_on_windows = True
+
+    vp.x = int(geo.left()) + 150
+    landed: list[tuple[int, int]] = []
+    phys.landed.connect(lambda x, y: landed.append((x, y)))
+
+    def run_to_settle(limit=600):
+        ticks = 0
+        while (phys.falling or vp.y + vp.h < _floor() - 2) and ticks < limit:
+            phys._tick()
+            ticks += 1
+        assert not phys.falling, "still falling after a full budget → stuck"
+
+    # phase A: plain drop with no windows → settles on the work-area floor
+    vp.y = win_y - 400
+    run_to_settle()
+    assert abs((vp.y + vp.h) - _floor()) <= 3, "no-window drop must settle on the floor"
+
+    # phase B: a window appears; re-dropping from above it must perch ON the window top
+    wins.append(_fake_window(int(geo.left()), win_y))
+    vp.y = win_y - 400
+    run_to_settle()
+    assert abs((vp.y + vp.h) - win_y) <= 2, "drop over a window must land on its top"
+    pos_perched = (vp.x, vp.y)
+    for _ in range(30):                      # rest while perched: no spurious re-fall
+        phys._tick()
+    assert not phys.falling and (vp.x, vp.y) == pos_perched
+
+    # phase C: the window vanishes → standee check finds it dead → real fall to floor
+    import vaultsprite.terrain_physics as tp
+    monkeypatch.setattr(tp, "_win32gui", type("_Win32Dummy", (), {}))
+    monkeypatch.setattr(phys, "_check_standee_alive", lambda: False)
+    wins.clear()
+    for _ in range(15):
+        phys._tick()
+    run_to_settle()
+    assert abs((vp.y + vp.h) - _floor()) <= 3, "after windows vanish the pet must settle on the floor"
+

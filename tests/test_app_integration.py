@@ -6,20 +6,21 @@ import pytest
 from tests.conftest import FakeConfig, spin
 
 
-def _test_config(tmp_path):
+def _test_config(tmp_path, mascot=False):
     return FakeConfig({
         "obsidian.vault_root": str(tmp_path / "IntegrationVault"),
         "remote.ask_interval_ms": 0,                       # vision loop off in CI
         "health.work_threshold_min": 1,
         "stats.tick_ms": 30_000,                           # don't tick during tests
+        "mascot.enabled": mascot,                          # legacy-FSM tests exercise M2; boots exercise M9
     })
 
 
 def test_app_boots_and_wires(qapp, tmp_path):
     from vaultsprite.main import App
 
-    app = App(_test_config(tmp_path))
-    app.start()                                   # drives initial FSM play + timers
+    app = App(_test_config(tmp_path, mascot=True))   # exercise the M9 mascot wiring
+    app.start()                                   # drives initial mascot tick + timers
     app.window.show()
 
     # every module constructed and cross-referenced

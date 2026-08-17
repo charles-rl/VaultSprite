@@ -27,10 +27,11 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QPoint, QRectF, QTimer, Qt, Signal
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QImageReader,
-                           QMouseEvent, QMovie, QPainter, QPainterPath, QPixmap,
-                           QTransform)
-from PySide6.QtWidgets import QApplication, QLabel, QMenu, QVBoxLayout, QWidget
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QIcon, QImage,
+                           QImageReader, QMouseEvent, QMovie, QPainter, QPainterPath,
+                           QPixmap, QTransform)
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMenu,
+                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .animation_fsm import StateTransition
 from .config import Config, load_config
@@ -227,6 +228,103 @@ class SpeechBubble(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# M9 telemetry overlay + system-tray manager (mirror Shimeji-Desktop's
+# DebugWindow / TrayMenu; live coords/behavior/frame + global controls).
+# ---------------------------------------------------------------------------
+class TelemetryOverlay(QWidget):
+    """Small always-on-top panel showing live M9 state (coords/behavior/frame)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet(
+            "background: rgba(20,20,30,200); color: #dfe6ff;"
+            "font: 10px monospace; border-radius:6px; padding:4px;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        self._label = QLabel("mascot telemetry: n/a")
+        self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self._label)
+        self.setFixedSize(260, 84)
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self.refresh)
+
+    def start(self, getter):
+        """`getter() -> dict` returns live fields each refresh tick."""
+        self._getter = getter
+        self.refresh()
+        self.move(8, 8)
+        self.show()
+        self._timer.start()
+
+    def refresh(self):
+        g = getattr(self, "_getter", None)
+        if g is None:
+            return
+        d = g()
+        text = (f"pos=({d.get('x', 0)},{d.get('y', 0)})\n"
+                f"behavior={d.get('behavior', '')}\n"
+                f"frame={d.get('frame', '')}")
+        self._label.setText(text)
+
+    def closeEvent(self, event):  # noqa: N802
+        self._timer.stop()
+        super().closeEvent(event)
+
+
+class SystemTray(QSystemTrayIcon):
+    """Global manager: scale, per-behavior toggles (exclude-by-name), dismiss/quit."""
+
+    scale_changed = Signal(float)          # scale factor applied by App
+    dismiss_requested = Signal()
+    quit_requested = Signal()
+
+    def __init__(self, icon_path: str, behaviors: list[str], parent=None):
+        super().__init__(parent)
+        icon = QIcon(icon_path) if icon_path and Path(icon_path).exists() else QIcon()
+        self.setIcon(icon)
+        self.setToolTip("VaultSprite")
+        self._behaviors = behaviors
+
+        menu = QMenu()
+        scale_menu = menu.addMenu("Scale")
+        for label, factor in (("Small (0.7x)", 0.7), ("Default (1.0x)", 1.0),
+                              ("Large (1.3x)", 1.3)):
+            act = scale_menu.addAction(label)
+            act.triggered.connect(lambda _=False, f=factor: self.scale_changed.emit(f))
+
+        self._beh_actions: dict[str, object] = {}
+        beh_menu = menu.addMenu("Behaviors (exclude)")
+        for name in behaviors:
+            a = beh_menu.addAction(name)
+            a.setCheckable(True)
+            a.setChecked(False)
+            a.toggled.connect(lambda checked, n=name: self._beh_toggled(n, checked))
+            self._beh_actions[name] = a
+
+        menu.addSeparator()
+        menu.addAction("Dismiss").triggered.connect(self.dismiss_requested.emit)
+        menu.addAction("Quit VaultSprite").triggered.connect(self.quit_requested.emit)
+        self.setContextMenu(menu)
+        self.activated.connect(self._on_activated)
+
+    def _beh_toggled(self, name: str, checked: bool):
+        self.behavior_toggled.emit(name, checked)
+
+    def _on_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            menu = self.contextMenu()
+            if menu is not None:
+                menu.popup(QCursor.pos())
+
+    behavior_toggled = Signal(str, bool)
+
+
+# ---------------------------------------------------------------------------
 # The overlay window itself
 # ---------------------------------------------------------------------------
 class PetOverlayWindow(QWidget):
@@ -383,6 +481,17 @@ class PetOverlayWindow(QWidget):
             return
         transform = QTransform().scale(-1 if flipped else 1, 1)
         self.pet_label.setPixmap(base.transformed(transform))
+
+    def render_mascot_frame(self, pixmap: QPixmap):
+        """M9 Shimeji frames arrive already scaled + mirrored (MascotEngine)."""
+        if pixmap and not pixmap.isNull():
+            self.pet_label.setPixmap(pixmap)
+
+    def set_scale(self, factor: float):
+        """Resize the overlay (tray scale control); sprite rescales on next frame."""
+        self._w = max(16, int(self._w * factor))
+        self._h = max(16, int(self._h * factor))
+        self.setFixedSize(self._w, self._h)
 
     def _render_frame(self, frame: QPixmap):
         """Scale to the window, then apply the walk-direction mirror. This single

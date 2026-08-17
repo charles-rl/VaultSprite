@@ -446,7 +446,7 @@
 			<ActionReference Name="ClimbWall" TargetY="#{mascot.environment.workArea.top+64}" />
 			<ActionReference Name="Offset" Y="-64" />
 			<ActionReference Name="Look" />
-			<ActionReference Name="ClimbCeiling" TargetX="${mascot.lookRight ? mascot.environment.workArea.left+Math.random()*100 : mascot.environment.workArea.right-Math.random*100}" />
+			<ActionReference Name="ClimbCeiling" TargetX="${mascot.lookRight ? mascot.environment.workArea.left+Math.random()*100 : mascot.environment.workArea.right-Math.random()*100}" />
 		</Action>
 
 		<Action Name="ClimbAlongCeiling" Type="Sequence" Loop="false">
@@ -536,7 +536,7 @@
 			<ActionReference Name="Offset" Y="-64" />
 			<ActionReference Name="Sit" Duration="5" />
 			<ActionReference Name="Stand" Duration="${10+Math.random()*10}" />
-			<ActionReference Name="Walk" TargetX="${mascot.lookRight ? mascot.environment.activeIE.left+Math.random()*100 : mascot.environment.activeIE.right-Math.random*100}" />
+			<ActionReference Name="Walk" TargetX="${mascot.lookRight ? mascot.environment.activeIE.left+Math.random()*100 : mascot.environment.activeIE.right-Math.random()*100}" />
 		</Action>
 
 		<Action Name="ClimbIEBottom" Type="Sequence" Loop="false">

@@ -185,18 +185,23 @@ class RemoteAgent(QObject):
     # async dispatch (sync openai SDK in a per-call QThread) — fire & forget
     # --------------------------------------------------------------------------
     def ask(self, prompt: str, window_context: str = "", screenshot: bool = True):
-        """Dispatch a request off-thread; reply arrives via ``response_ready``."""
+        """Dispatch a request off-thread; reply arrives via ``response_ready``.
+
+        Everything blocking — the self-foreground check, mss capture + resize/encode,
+        payload building AND the LLM call — runs inside the per-call QThread worker, so
+        ``ask()`` itself returns in microseconds and the GUI never blocks on a slow
+        screen grab or first-inference model load."""
         if not self.enabled:
             self.error.emit("LLM client unavailable (openai SDK missing or build failed)")
             return
-        if screenshot and self._self_is_foreground():
-            logger.info("pet is foreground; skipping screenshot capture")
-            screenshot = False
-
-        messages = self.build_messages(prompt, window_context=window_context,
-                                       screenshot=screenshot)
 
         def _call() -> str:
+            take_shot = screenshot
+            if take_shot and self._self_is_foreground():
+                logger.info("pet is foreground; skipping screenshot capture")
+                take_shot = False
+            messages = self.build_messages(prompt, window_context=window_context,
+                                           screenshot=take_shot)
             resp = self._client.chat.completions.create(
                 model=self.model,
                 messages=messages,

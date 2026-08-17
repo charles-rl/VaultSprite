@@ -32,6 +32,10 @@ def detector(qapp, titles):
     ("Notepad++ [test.txt*]", CONTEXT_WORK),            # notepad++ is a work keyword
     ("Steam - Store", CONTEXT_PLAY),                    # outline example
     ("Google Chrome - youtube.com", CONTEXT_PLAY),      # play wins (no work keyword)
+    # whole-word matching: "word"/"excel" keywords must NOT fire inside other words —
+    # the old raw-substring match made e.g. "The World of Tanks" count as WORK
+    ("The World of Tanks - Battle", None),              # 'world' contains 'word'? no → not a work hit
+    ("Microsoft Word - doc.docx", CONTEXT_WORK),        # real 'Word' still classifies
 ])
 def test_classify_boundaries(detector, title, expected):
     assert detector.classify(title) == expected
@@ -40,6 +44,65 @@ def test_classify_boundaries(detector, title, expected):
 def test_classify_empty_and_unknown(detector):
     assert detector.classify("") is None            # unknown → no change (keep last)
     assert detector.classify("Some Random App") is None
+
+
+# -- context decay: stop sticking to the last bucket forever ("always WORK" fix) -----
+
+@pytest.fixture()
+def short_decay(qapp, titles):
+    """Detector that decays after just 2 unknown polls (instead of ~6 / 30s)."""
+    cfg = FakeConfig({"context.poll_ms": 30, "context.unknown_decay_polls": 2})
+    det = ContextDetector(cfg, probe=lambda: titles[0])
+    yield det
+    det.stop()
+
+
+def test_unknown_context_decays_to_unknown(short_decay, titles):
+    seen = []
+    short_decay.context_changed.connect(lambda c: seen.append(c))
+
+    titles[0] = "PyCharm - project"
+    short_decay.poll_once()
+    assert seen == [CONTEXT_WORK]
+
+    # 1 unknown poll: still holds WORK (grace for transient/short-lived titles)
+    titles[0] = "Some Random App"
+    short_decay.poll_once()
+    assert seen == [CONTEXT_WORK], "single unknown poll must not flip the bucket yet"
+
+    # 2nd consecutive unknown poll → decay out of the stuck bucket
+    short_decay.poll_once()
+    assert seen == [CONTEXT_WORK, "UNKNOWN"], f"expected decay after N polls; saw {seen}"
+
+
+def test_work_title_resets_unknown_streak(short_decay, titles):
+    seen = []
+    short_decay.context_changed.connect(lambda c: seen.append(c))
+    titles[0] = "PyCharm - project"
+    short_decay.poll_once()
+
+    for _ in range(5):                              # unknown / work interleaving
+        titles[0] = "Random App X"
+        short_decay.poll_once()                     # streak=1, holds WORK
+        titles[0] = "PyCharm - other.py"
+        short_decay.poll_once()                     # real match resets the streak
+
+    assert seen == [CONTEXT_WORK], \
+        f"a real work title between unknown polls must never decay to UNKNOWN: {seen}"
+
+
+def test_empty_titles_also_count_as_unknown_polls(short_decay, titles):
+    """A blank probe (e.g. minimized/edge windows) is an 'unknown' poll too."""
+    seen = []
+    short_decay.context_changed.connect(lambda c: seen.append(c))
+    titles[0] = "Steam - Store"
+    short_decay.poll_once()
+    assert seen == [CONTEXT_PLAY]
+
+    for _ in range(3):                              # blank foregrounds in a row
+        titles[0] = ""
+        short_decay.poll_once()
+    assert seen[-1] == "UNKNOWN", f"blank polls must decay the bucket: {seen}"
 
 
 # -- poll loop: signal only on real changes -------------------------------------------

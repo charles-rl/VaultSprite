@@ -1,0 +1,794 @@
+package com.group_finity.mascot;
+
+import com.formdev.flatlaf.FlatDarkLaf;
+import com.formdev.flatlaf.FlatLaf;
+import com.formdev.flatlaf.FlatLightLaf;
+import com.formdev.flatlaf.themes.FlatMacDarkLaf;
+import com.formdev.flatlaf.themes.FlatMacLightLaf;
+import com.group_finity.mascot.behavior.BehaviorExecutionException;
+import com.group_finity.mascot.config.BehaviorInstantiationException;
+import com.group_finity.mascot.config.Configuration;
+import com.group_finity.mascot.config.ConfigurationException;
+import com.group_finity.mascot.config.Entry;
+import com.group_finity.mascot.image.ImagePairs;
+import com.group_finity.mascot.image.ImageUtils;
+import com.group_finity.mascot.imagesetchooser.ImageSetChooser;
+import com.group_finity.mascot.platform.NativeFactory;
+import com.group_finity.mascot.sound.Sounds;
+import com.jthemedetecor.OsThemeDetector;
+import org.apache.commons.exec.OS;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.w3c.dom.Document;
+import org.xml.sax.SAXException;
+import org.xml.sax.SAXParseException;
+
+import javax.imageio.ImageIO;
+import javax.swing.*;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.LogManager;
+
+/**
+ * Program entry point.
+ *
+ * @author Yuki Yamada
+ * @author Shimeji-ee Group
+ */
+public class Main {
+    private static final Logger log = LoggerFactory.getLogger(Main.class);
+
+    public static final Path CONFIG_DIRECTORY = Path.of("conf");
+    public static final Path IMAGE_DIRECTORY = Path.of("img");
+    public static final Path SOUND_DIRECTORY = Path.of("sound");
+    public static final Path SETTINGS_FILE = CONFIG_DIRECTORY.resolve("settings.properties");
+    public static final Path LOGGING_FILE = CONFIG_DIRECTORY.resolve("logging.properties");
+    public static final Path ICON_FILE = IMAGE_DIRECTORY.resolve("icon.png");
+
+    private static final String[] ACTIONS_FILENAMES = {
+            "actions.xml", "動作.xml", "one.xml", "1.xml"
+    };
+
+    private static final String[] BEHAVIORS_FILENAMES = {
+            "behaviors.xml", "behavior.xml", "行動.xml", "two.xml", "2.xml"
+    };
+
+    /**
+     * Constant for an empty array of strings.
+     * This is used to save memory by only allocating one empty array.
+     */
+    // If we had enough stray constants to warrant creating a Constants class, I would have put this in there.
+    // Alas, we don't have that many constants.
+    public static final String[] EMPTY_STRING_ARRAY = new String[0];
+
+    static {
+        try (InputStream input = Files.newInputStream(LOGGING_FILE)) {
+            LogManager.getLogManager().readConfiguration(input);
+        } catch (final IOException | SecurityException e) {
+            log.error("Failed to load log properties", e);
+        }
+    }
+
+    private static final Main INSTANCE = new Main();
+    private final Manager manager = new Manager();
+    private List<String> imageSets = new ArrayList<>();
+    private final Map<String, Configuration> configurations = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> childImageSets = new ConcurrentHashMap<>();
+
+    /**
+     * A collection of configurations that failed to load.
+     * This is used to avoid attempting to load these configurations more than once.
+     */
+    private final Collection<String> failedConfigurations = new ArrayList<>();
+
+    private final Settings settings = new Settings();
+    private ResourceBundle languageBundle;
+
+    /**
+     * The icon for the program.
+     * Should be accessed through {@link #getIcon()}, which initializes this field if it is {@code null}.
+     *
+     * @see #getIcon()
+     */
+    private static BufferedImage icon;
+
+    private static JFrame frame;
+
+    private final TrayMenu trayMenu = new TrayMenu();
+
+    // TODO: Refactor this away entirely.
+    public static Main getInstance() {
+        return INSTANCE;
+    }
+
+    static JFrame getFrame() {
+        return frame;
+    }
+
+    public static void showError(String message) {
+        showError(message, null);
+    }
+
+    public static void showError(String message, Throwable exception) {
+        showError(frame, message, exception);
+    }
+
+    public static void showError(Component parentComponent, String message) {
+        showError(parentComponent, message, null);
+    }
+
+    public static void showError(Component parentComponent, String message, Throwable exception) {
+        ResourceBundle languageBundle = INSTANCE.languageBundle;
+        if (exception != null) {
+            StringBuilder messageBuilder = new StringBuilder(message);
+            do {
+                Class<? extends Throwable> exceptionClass = exception.getClass();
+                if (exceptionClass.getModule().getName().equals(Main.class.getModule().getName()) &&
+                        exceptionClass != com.group_finity.mascot.platform.x11.X.X11Exception.class) {
+                    // If it's a Shimeji exception, only append the exception message
+                    messageBuilder.append(System.lineSeparator()).append(exception.getMessage());
+                } else if (exception instanceof SAXParseException sax) {
+                    messageBuilder.append(System.lineSeparator()).append("Line ").append(sax.getLineNumber()).append(": ").append(exception.getMessage());
+                } else {
+                    messageBuilder.append(System.lineSeparator()).append(exception);
+                }
+                exception = exception.getCause();
+            }
+            while (exception != null);
+            messageBuilder.append(System.lineSeparator()).append(languageBundle == null ?
+                    "See log for more details." : languageBundle.getString("SeeLogForDetails"));
+            message = messageBuilder.toString();
+        }
+        String title = languageBundle == null ? "Error" : languageBundle.getString("Error");
+        // TODO: Call this on the EDT safely without letting other windows appear in front of it before it's closed
+        JOptionPane.showMessageDialog(parentComponent, message, title, JOptionPane.ERROR_MESSAGE);
+    }
+
+    static void main() throws InterruptedException, InvocationTargetException {
+        SwingUtilities.invokeAndWait(() -> {
+            // Load theme before any Swing components are created
+            updateLookAndFeel();
+            // Create frame before anything else happens, in case showError() gets called
+            frame = new JFrame();
+        });
+        OsThemeDetector.getDetector().registerListener(Main::updateLookAndFeel);
+
+        try {
+            INSTANCE.run();
+        } catch (OutOfMemoryError err) {
+            log.error("Out of memory. There are probably too many "
+                    + "Shimeji mascots in the image folder for your computer to handle. "
+                    + "Select fewer image sets or move some to the "
+                    + "img/unused folder and try again.", err);
+            showError("""
+                    Out of memory. There are probably too many
+                    Shimeji mascots for your computer to handle.
+                    Select fewer image sets or move some to the
+                    img/unused folder and try again.""");
+            System.exit(0);
+        }
+    }
+
+    public void run() {
+        // Load settings
+        settings.load(SETTINGS_FILE);
+
+        // Add hook to save settings when the program shuts down
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> settings.save(SETTINGS_FILE)));
+
+        // Load language
+        loadLanguage(settings.language);
+
+        // Get the image sets to use
+        if (!settings.alwaysShowShimejiChooser) {
+            for (String set : settings.activeImageSets)
+                if (!set.trim().isEmpty()) {
+                    imageSets.add(set.trim());
+                }
+        }
+
+        // Load mascot configurations
+        configurationLoadLoop();
+
+        // Create the tray icon
+        SwingUtilities.invokeLater(trayMenu::createTrayIcon);
+
+        // Initialize the environment
+        if (settings.windowedMode) {
+            try {
+                /*
+                 * If in windowed mode, initialize the environment on the EDT before loading any mascots
+                 * so the mascots spawn at the correct positions
+                 */
+                SwingUtilities.invokeAndWait(() -> NativeFactory.getInstance().getEnvironment().init());
+            } catch (InterruptedException | InvocationTargetException e) {
+                throw new RuntimeException(e);
+            }
+        } else
+            NativeFactory.getInstance().getEnvironment().init();
+
+        // Create mascots
+        for (String imageSet : imageSets) {
+            if (configurations.get(imageSet).getSplashImagePath() != null &&
+                    (settings.alwaysShowInformationScreen || !settings.informationDismissed.contains(imageSet))) {
+                SwingUtilities.invokeLater(() -> {
+                    InformationWindow info = new InformationWindow();
+                    info.init(imageSet, configurations.get(imageSet));
+                    info.display();
+                });
+                setMascotInformationDismissed(imageSet);
+            }
+            createMascot(imageSet);
+        }
+
+        manager.start();
+    }
+
+    /**
+     * Shows the image set chooser if there are no image sets selected, and then loads the selected image sets.
+     * If none of the selected image sets' configurations successfully load, the process repeats.
+     */
+    private void configurationLoadLoop() {
+        do {
+            if (imageSets.isEmpty()) {
+                try {
+                    SwingUtilities.invokeAndWait(() -> {
+                        imageSets = new ImageSetChooser(frame, true).display();
+                        if (imageSets == null) {
+                            exit();
+                        }
+                    });
+                } catch (InterruptedException | InvocationTargetException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+
+            // Load mascot configurations
+            for (int index = 0; index < imageSets.size(); index++) {
+                String imageSet = imageSets.get(index);
+                if (!loadConfiguration(imageSet)) {
+                    // failed to load
+                    imageSets.remove(imageSet);
+                    index--;
+                }
+            }
+            // Clear any items that were added to this collection during the loading sequence
+            failedConfigurations.clear();
+        }
+        while (imageSets.isEmpty());
+    }
+
+    /**
+     * Loads the configuration files for the given image set.
+     *
+     * @param imageSet the image set to load
+     */
+    private boolean loadConfiguration(final String imageSet) {
+        if (configurations.containsKey(imageSet)) {
+            return true;
+        } else if (failedConfigurations.contains(imageSet)) {
+            return false;
+        }
+        try {
+            Path actionsFile = getActionsFilePath(imageSet);
+
+            log.info("Reading action file \"{}\" for image set \"{}\"", actionsFile, imageSet);
+
+            DocumentBuilderFactory builderFactory = DocumentBuilderFactory.newInstance();
+            builderFactory.setIgnoringComments(true);
+            DocumentBuilder builder = builderFactory.newDocumentBuilder();
+
+            final Document actionsDocument;
+            try (InputStream input = Files.newInputStream(actionsFile)) {
+                actionsDocument = builder.parse(input);
+            }
+
+            Configuration configuration = new Configuration();
+
+            // Store this Entry in a variable so we can reuse it when determining this image set's child image sets
+            Entry actionsEntry = new Entry(actionsDocument.getDocumentElement());
+            configuration.load(actionsEntry, imageSet);
+
+            /* It's possible (albeit unlikely) that the different config files may use different schemas.
+            Therefore, we need to save the action file's schema into a variable before loading any other files
+            so the Configuration's schema doesn't get overwritten when loading those files.
+            We will use this schema when determining this image set's child image sets. */
+            ResourceBundle actionsSchema = configuration.getSchema();
+
+            Path behaviorsFile = getBehaviorsFilePath(imageSet);
+
+            log.info("Reading behavior file \"{}\" for image set \"{}\"", behaviorsFile, imageSet);
+
+            final Document behaviorsDocument;
+            try (InputStream input = Files.newInputStream(behaviorsFile)) {
+                behaviorsDocument = builder.parse(input);
+            }
+
+            configuration.load(new Entry(behaviorsDocument.getDocumentElement()), imageSet);
+
+            try {
+                Path infoFile = getInfoFilePath(imageSet);
+
+                log.info("Reading information file \"{}\" for image set \"{}\"", infoFile, imageSet);
+
+                final Document infoDocument;
+                try (InputStream input = Files.newInputStream(infoFile)) {
+                    infoDocument = builder.parse(input);
+                }
+
+                configuration.load(new Entry(infoDocument.getDocumentElement()), imageSet);
+            } catch (FileNotFoundException ignored) {
+                // Information file is optional, so ignore if it's missing
+            }
+
+            configuration.validate();
+
+            configurations.put(imageSet, configuration);
+
+            List<String> childMascots = new ArrayList<>();
+
+            // Determine the child image sets for this image set
+            List<Entry> actionLists = actionsEntry.selectChildren(actionsSchema.getString("ActionList"));
+            if (!actionLists.isEmpty()) {
+                for (final Entry actionList : actionLists) {
+                    List<Entry> actionNodes = actionList.selectChildren(actionsSchema.getString("Action"));
+                    if (!actionNodes.isEmpty()) {
+                        for (final Entry actionNode : actionNodes) {
+                            if (actionNode.hasAttribute(actionsSchema.getString("BornMascot"))) {
+                                String childImageSet = actionNode.getAttribute(actionsSchema.getString("BornMascot"));
+                                if (!childMascots.contains(childImageSet)) {
+                                    childMascots.add(childImageSet);
+                                }
+                                if (!configurations.containsKey(childImageSet)) {
+                                    loadConfiguration(childImageSet);
+                                }
+                            }
+                            if (actionNode.hasAttribute(actionsSchema.getString("TransformMascot"))) {
+                                String childImageSet = actionNode.getAttribute(actionsSchema.getString("TransformMascot"));
+                                if (!childMascots.contains(childImageSet)) {
+                                    childMascots.add(childImageSet);
+                                }
+                                if (!configurations.containsKey(childImageSet)) {
+                                    loadConfiguration(childImageSet);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            childImageSets.put(imageSet, childMascots);
+
+            return true;
+        } catch (IOException | ParserConfigurationException | SAXException | ConfigurationException |
+                 RuntimeException e) {
+            log.error("Failed to load configuration for image set \"{}\"", imageSet, e);
+            showError(String.format(languageBundle.getString("FailedLoadConfigErrorMessage"), imageSet), e);
+            configurations.remove(imageSet);
+            childImageSets.remove(imageSet);
+            ImagePairs.removeAll(imageSet);
+            Sounds.removeAll(imageSet);
+            failedConfigurations.add(imageSet);
+        }
+
+        return false;
+    }
+
+    public static Path getActionsFilePath(String imageSet) throws FileNotFoundException {
+        Path[] configDirs = {
+                IMAGE_DIRECTORY.resolve(imageSet).resolve(CONFIG_DIRECTORY),
+                CONFIG_DIRECTORY.resolve(imageSet),
+                CONFIG_DIRECTORY
+        };
+
+        for (Path dir : configDirs) {
+            for (String name : ACTIONS_FILENAMES) {
+                Path filePath = dir.resolve(name);
+                if (Files.isRegularFile(filePath)) {
+                    return filePath;
+                }
+            }
+        }
+
+        throw new FileNotFoundException("Could not find action file for image set: " + imageSet);
+    }
+
+    public static Path getBehaviorsFilePath(String imageSet) throws FileNotFoundException {
+        Path[] configDirs = {
+                IMAGE_DIRECTORY.resolve(imageSet).resolve(CONFIG_DIRECTORY),
+                CONFIG_DIRECTORY.resolve(imageSet),
+                CONFIG_DIRECTORY
+        };
+
+        for (Path dir : configDirs) {
+            for (String name : BEHAVIORS_FILENAMES) {
+                Path filePath = dir.resolve(name);
+                if (Files.isRegularFile(filePath)) {
+                    return filePath;
+                }
+            }
+        }
+
+        throw new FileNotFoundException("Could not find behavior file for image set: " + imageSet);
+    }
+
+    public static Path getInfoFilePath(String imageSet) throws FileNotFoundException {
+        Path[] configDirs = {
+                IMAGE_DIRECTORY.resolve(imageSet).resolve(CONFIG_DIRECTORY),
+                CONFIG_DIRECTORY.resolve(imageSet),
+                CONFIG_DIRECTORY
+        };
+
+        for (Path dir : configDirs) {
+            Path filePath = dir.resolve("info.xml");
+            if (Files.isRegularFile(filePath)) {
+                return filePath;
+            }
+        }
+
+        throw new FileNotFoundException("Could not find information file for image set: " + imageSet);
+    }
+
+    public static Path getSoundFilePath(String imageSet, String soundFile) throws FileNotFoundException {
+        Path[] soundDirs = {
+                IMAGE_DIRECTORY.resolve(imageSet).resolve(SOUND_DIRECTORY),
+                SOUND_DIRECTORY.resolve(imageSet),
+                SOUND_DIRECTORY
+        };
+
+        for (Path dir : soundDirs) {
+            Path filePath = dir.resolve(soundFile);
+            if (Files.isRegularFile(filePath)) {
+                return filePath;
+            }
+        }
+
+        throw new FileNotFoundException("Could not find sound file \"" + soundFile + "\" for image set \"" + imageSet + '"');
+    }
+
+    /**
+     * Creates a {@link Mascot} with a randomly selected image set.
+     */
+    public void createMascot() {
+        int length = imageSets.size();
+        if (length == 0) {
+            return;
+        }
+        int random = (int) (length * Math.random());
+        createMascot(imageSets.get(random));
+    }
+
+    /**
+     * Creates a {@link Mascot} with the specified image set.
+     *
+     * @param imageSet the image set to use
+     */
+    public void createMascot(String imageSet) {
+        log.info("Creating mascot with image set \"{}\"", imageSet);
+
+        // Create one mascot
+        final Mascot mascot = new Mascot(imageSet);
+
+        // Create it outside the bounds of the screen
+        mascot.getAnchor().setLocation(-4000, -4000);
+
+        // Randomize the initial orientation
+        mascot.setLookRight(Math.random() < 0.5);
+
+        try {
+            mascot.setBehavior(getConfiguration(imageSet).buildNextBehavior(null, mascot));
+            manager.add(mascot);
+        } catch (final BehaviorInstantiationException | BehaviorExecutionException e) {
+            // Not sure why this says "first action" instead of "first behavior", but changing it would require changing all of the translations, so...
+            log.error("Failed to initialize the first action for mascot \"{}\"", mascot, e);
+            showError(String.format(languageBundle.getString("FailedInitialiseFirstActionErrorMessage"), mascot), e);
+            mascot.dispose();
+        } catch (RuntimeException e) {
+            log.error("Could not create mascot \"{}\"", mascot, e);
+            showError(String.format(languageBundle.getString("CouldNotCreateShimejiErrorMessage"), imageSet), e);
+            mascot.dispose();
+        }
+    }
+
+    void loadLanguage(Locale locale) {
+        try {
+            URL[] urls = {CONFIG_DIRECTORY.toUri().toURL()};
+            try (URLClassLoader loader = new URLClassLoader(urls)) {
+                languageBundle = ResourceBundle.getBundle("language", locale, loader);
+            }
+        } catch (IOException e) {
+            log.error("Failed to load language file for locale {}", locale.toLanguageTag(), e);
+            showError("The language file for locale " + locale.toLanguageTag() + " could not be loaded. Ensure that you have the latest Shimeji language.properties in your conf directory.");
+            exit();
+        }
+    }
+
+    private void setMascotInformationDismissed(final String imageSet) {
+        if (!settings.informationDismissed.contains(imageSet)) {
+            settings.informationDismissed.add(imageSet);
+        }
+    }
+
+    public void setMascotBehaviorEnabled(final String name, final Mascot mascot, boolean enabled) {
+        List<String> list;
+        if (settings.disabledBehaviors.containsKey(mascot.getImageSet())) {
+            list = settings.disabledBehaviors.get(mascot.getImageSet());
+        } else {
+            list = new ArrayList<>();
+        }
+
+        if (list.contains(name) && enabled) {
+            list.remove(name);
+        } else if (!list.contains(name) && !enabled) {
+            list.add(name);
+        }
+
+        if (list.isEmpty()) {
+            settings.disabledBehaviors.remove(mascot.getImageSet());
+        } else {
+            settings.disabledBehaviors.put(mascot.getImageSet(), list);
+        }
+    }
+
+    void reloadAllImageSets() {
+        boolean isExit = manager.isExitOnLastRemoved();
+        manager.setExitOnLastRemoved(false);
+        manager.disposeAll();
+
+        // Wipe all loaded data
+        ImagePairs.clear();
+        Sounds.clear();
+        configurations.clear();
+
+        // Load mascot configurations
+        configurationLoadLoop();
+
+        // Create mascots
+        for (String imageSet : imageSets) {
+            createMascot(imageSet);
+        }
+
+        manager.setExitOnLastRemoved(isExit);
+    }
+
+    /**
+     * Replaces the current set of active image sets without modifying
+     * valid image sets that are already active. Does nothing if {@code newImageSets == null}.
+     *
+     * @param newImageSets all the image sets that should now be active
+     * @author LavenderSnek
+     * @author Kilkakon (did some tweaks)
+     */
+    void setActiveImageSets(Collection<String> newImageSets) {
+        if (newImageSets == null) {
+            return;
+        }
+
+        // I don't think there would be enough image sets chosen at any given
+        // time for it to be worth using HashSet, but I might be wrong
+        Collection<String> toRemove = new ArrayList<>(imageSets);
+        toRemove.removeAll(newImageSets);
+
+        Collection<String> toAdd = new ArrayList<>();
+        Collection<String> toRetain = new ArrayList<>();
+        for (String set : newImageSets) {
+            if (!imageSets.contains(set)) {
+                toAdd.add(set);
+            }
+            if (!toRetain.contains(set)) {
+                toRetain.add(set);
+            }
+            populateCollectionWithChildSets(set, toRetain);
+        }
+
+        boolean isExit = manager.isExitOnLastRemoved();
+        manager.setExitOnLastRemoved(false);
+
+        if (!toRemove.isEmpty()) {
+            for (String r : toRemove) {
+                removeLoadedImageSet(r, toRetain);
+            }
+        }
+
+        if (!toAdd.isEmpty()) {
+            for (String a : toAdd) {
+                addImageSet(a);
+            }
+        }
+
+        // Clear any items that were added to this collection during the loading sequence
+        failedConfigurations.clear();
+
+        if (imageSets.isEmpty()) {
+            // All configurations failed to load, so prompt the user to select image sets again
+            configurationLoadLoop();
+        }
+
+        manager.setExitOnLastRemoved(isExit);
+    }
+
+    /**
+     * Recursively populates the given collection with all child image sets of the given image set.
+     *
+     * @param imageSet the image set whose children should be added to the collection
+     * @param childList the collection to populate
+     */
+    private void populateCollectionWithChildSets(String imageSet, Collection<String> childList) {
+        if (childImageSets.containsKey(imageSet)) {
+            for (String set : childImageSets.get(imageSet)) {
+                if (!childList.contains(set)) {
+                    childList.add(set);
+                    populateCollectionWithChildSets(set, childList);
+                }
+            }
+        }
+    }
+
+    /**
+     * Unloads the given image set and disposes of any mascots of that image set, unless it is a child image set of
+     * an image set that has been selected in the image set chooser.
+     * If the given image set has any children image sets that have not been selected in the image set chooser,
+     * those image sets will also be unloaded and their mascots will be disposed.
+     *
+     * @param imageSet the image set to remove
+     * @param setsToIgnore a collection of image sets that should not be removed
+     */
+    private void removeLoadedImageSet(String imageSet, Collection<String> setsToIgnore) {
+        if (!setsToIgnore.contains(imageSet)) {
+            setsToIgnore.add(imageSet);
+            imageSets.remove(imageSet);
+            manager.remainNone(imageSet);
+            configurations.remove(imageSet);
+            ImagePairs.removeAll(imageSet);
+            Sounds.removeAll(imageSet);
+
+            if (childImageSets.containsKey(imageSet)) {
+                for (String set : childImageSets.get(imageSet)) {
+                    removeLoadedImageSet(set, setsToIgnore);
+                }
+            }
+
+            childImageSets.remove(imageSet);
+        }
+    }
+
+    /**
+     * Loads the given image set's configuration if it is not yet loaded, adds it to the list of loaded image sets,
+     * and creates a mascot of the image set.
+     * If the given image set's configuration is not yet loaded and its information has not been seen,
+     * its information window will be shown after the configuration has loaded.
+     *
+     * @param imageSet the image set to add
+     */
+    private void addImageSet(String imageSet) {
+        if (configurations.containsKey(imageSet)) {
+            imageSets.add(imageSet);
+            createMascot(imageSet);
+        } else if (!failedConfigurations.contains(imageSet)) {
+            if (loadConfiguration(imageSet)) {
+                imageSets.add(imageSet);
+                if (configurations.get(imageSet).getSplashImagePath() != null &&
+                        (settings.alwaysShowInformationScreen || !settings.informationDismissed.contains(imageSet))) {
+                    InformationWindow info = new InformationWindow();
+                    info.init(imageSet, configurations.get(imageSet));
+                    info.display();
+                    setMascotInformationDismissed(imageSet);
+                }
+                createMascot(imageSet);
+            }
+        }
+    }
+
+    Manager getManager() {
+        return manager;
+    }
+
+    public List<String> getImageSets() {
+        return imageSets;
+    }
+
+    public Configuration getConfiguration(String imageSet) {
+        return configurations.get(imageSet);
+    }
+
+    public Settings getSettings() {
+        return settings;
+    }
+
+    public ResourceBundle getLanguageBundle() {
+        return languageBundle;
+    }
+
+    TrayMenu getTrayMenu() {
+        return trayMenu;
+    }
+
+    public void exit() {
+        manager.disposeAll();
+        manager.stop();
+        System.exit(0);
+    }
+
+    /** Updates the {@link LookAndFeel} of the application based on the current OS and whether it's using dark/light mode. */
+    private static void updateLookAndFeel() {
+        final boolean isDark = OsThemeDetector.isSupported() && OsThemeDetector.getDetector().isDark();
+        updateLookAndFeel(isDark);
+    }
+
+    /**
+     * Updates the {@link LookAndFeel} of the application based on the current OS and whether it's using dark/light mode.
+     *
+     * @param isDark whether the system is currently using a dark theme
+     */
+    private static void updateLookAndFeel(boolean isDark) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> updateLookAndFeel(isDark));
+            return;
+        }
+
+        if (OS.isFamilyMac()) {
+            if (isDark) {
+                FlatMacDarkLaf.setup();
+            } else {
+                FlatMacLightLaf.setup();
+            }
+
+
+            FlatLaf.updateUI();
+            return;
+        }
+
+        if (isDark) {
+            FlatDarkLaf.setup();
+        } else {
+            FlatLightLaf.setup();
+        }
+        FlatLaf.updateUI();
+    }
+
+    /**
+     * Loads the icon file and returns it as a {@link BufferedImage}.
+     * If a custom icon has been placed at the path {@code img/icon.png}, then it will be loaded. Otherwise, the default
+     * icon will be loaded.
+     *
+     * @return The loaded {@link BufferedImage} icon, or a blank image if loading fails.
+     */
+    public static BufferedImage getIcon() {
+        if (icon != null) {
+            return icon;
+        }
+
+        if (Files.isRegularFile(ICON_FILE)) {
+            try (InputStream input = Files.newInputStream(ICON_FILE)) {
+                icon = ImageUtils.toCompatibleImage(ImageIO.read(input));
+                return icon;
+            } catch (final IOException e) {
+                log.warn("Failed to load custom icon file", e);
+            }
+        }
+
+        try (InputStream input = Objects.requireNonNull(Main.class.getResourceAsStream("/icon.png"))) {
+            icon = ImageUtils.toCompatibleImage(ImageIO.read(input));
+            return icon;
+        } catch (final IOException e) {
+            log.warn("Failed to load default icon file", e);
+        }
+
+        icon = ImageUtils.createCompatibleImage(16, 16);
+        return icon;
+    }
+}
