@@ -7,7 +7,7 @@ while implementing. Read this before touching code — several items here only m
 sense because of PySide6 6.11 build quirks found empirically on this box.
 
 Built: Python 3.13 (uv), Linux dev box, offscreen Qt validation. Target: Windows 11.
-Status at time of writing: **100 tests passing, `--smoke` exit 0, render check PASS.**
+Status at time of writing: **115 tests passing, `--smoke` exit 0, render check PASS.**
 (2026-08-17 P1 hardening pass added vault sandboxing/size-watcher/concurrency + the standalone
 `tests/test_vault_and_ai.py` runner; see §9. The earlier maintenance pass added the two M4
 airborne-clamp tests; the same-day Shijima cross-reference pass added the M9 mascot engine,
@@ -512,6 +512,37 @@ no-op on Windows (guarded by `os.name != "nt"`).
    `debug.vault_logging` (both default true).
 6. **Tests**: new `tests/test_mascot_engine.py` (12 pure-Python tests). Suite 74 → **86 passed**;
    `--smoke` exits 0.
+
+### 2026-08-17 — M9 swing/throw + vision-async fix pass (from `USER_FEEDBACK.md` "Recent User Notes")
+Four real bugs found and fixed (suite 86 → **115**; `--smoke` exit 0):
+1. **Sway (Dragged lean) never played — two stacked bugs** (§3-M9): (a) `AnimationAction._current_anim`
+   had `if not is_true_js(cond): continue` — **inverted**, so every conditional `<Animation>` branch
+   was skipped and only literal-`true`/empty branches ever rendered. This silently disabled Pinched's
+   lean poses, `SitAndLookAtMouse`, `ClimbWall` direction, etc. Rewrote it to return the first branch
+   whose `Condition` holds (literal `true` matches unconditionally, real `#{...}`/`${...}` evaluated per
+   tick). (b) `FootX` was never resolvable — `core.js_view` is a plain `JSMascot` and the evaluator's
+   `_View.__getattr__` returns `_UNDEFINED` for it, so every `FootX < cursor.x…` Pinched condition was
+   false. Added a `FootX` property (= `anchor.x`) to `JSMascot`. Verified: cursor far right → `shime9`,
+   far left → `shime10`, near → mild lean.
+2. **Throw snapped back to the grab point + zero horizontal velocity — two stacked bugs**: (a) the core
+   anchor is frozen at the grab point during a drag (the overlay moves the window, not the anchor), so
+   `Thrown` launched from there and the window snapped back. Added `MascotEngine.sync_anchor(x, y)`;
+   `App._on_drag_released` now syncs the anchor to the window's actual feet (`wx+px//2, wy+px`) before
+   `force_behavior("Thrown")`. (b) `ReferenceAction.init` forwarded `ctx.extra_attr` (None for a top-level
+   sequence child) to the target, dropping the reference's **own** overlay attrs — so `Thrown`'s
+   `InitialVX=${cursor.dx}`, and every `TargetX/Y`, `Duration`, `Gap`, `LookRight` reference overlay was
+   lost. Now forwards `self.init_attrs`. This also fixed Walk/Move/Jump target-based references.
+3. **"Ask what I see" genuinely froze the GUI** (black pet background, static frame) — the "M6 async
+   fix" was NOT actually async. `thread.started.connect(lambda: worker.run(fn))` runs the lambda (and the
+   whole blocking capture+LLM call) on the **GUI thread**; verified `_call` executed with `get_ident() ==
+   main_thread.ident`. Replaced with a `QThread` subclass `_BrainThread` overriding `run()` (blocking work
+   in the new OS thread; `finished`/`error` emitted from there and delivered back to the GUI thread via
+   queued connections). Verified: worker runs off-main-thread, the GUI event loop stays responsive, and
+   the reply arrives. Also added a "Thinking…" bubble on dispatch (`App._ask_vision`) so a slow remote
+   27B reply reads as async, plus worker thread-id/duration logging in `RemoteAgent.ask`.
+4. **Vault debug telemetry**: `App` now logs drag start and throw-release velocity/position to the
+   `Memory/Debug/mascot-<day>.md` trail (was behavior-changes-only), so swing/throw issues are traceable
+   from the uploaded Vault.
 
 ### 2026-08-17 — Shijima cross-reference pass: M9 mascot engine built; context/vision/physics fixes
 Addressed the open items in `USER_FEEDBACK.md` ("Recent User Notes": floating-above-floor stuck

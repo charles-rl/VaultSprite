@@ -138,6 +138,17 @@ class MascotEngine(QObject):
         if self.core:
             self.core.force_behavior(name)
 
+    def sync_anchor(self, x: float, y: float):
+        """Snap the core anchor to a real screen position (the sprite's feet).
+
+        Called by App on drag release: during a drag the overlay moves the window with
+        the mouse while the core anchor stays at the grab point, so without this the
+        ``Thrown``/``Falling`` launch would originate from the stale anchor and the window
+        would snap back there. ``x``/``y`` are the desired anchor coords (logical px)."""
+        if self.core:
+            self.core.state.anchor.x = float(x)
+            self.core.state.anchor.y = float(y)
+
     def inject_throw(self, vx_px_s: float, vy_px_s: float):
         """Feed a flick's release velocity (px/s) into the core's cursor delta so
         the ``Thrown`` action's InitialVX/VY (``cursor.dx/dy``) launch the pet."""

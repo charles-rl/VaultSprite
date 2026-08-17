@@ -140,3 +140,68 @@ def test_noop_inline_is_tickable():
     a = _NoOpInline(core=core)
     a.init(ActionCtx(core))
     assert a.subtick(0) is False          # finishes as a one-tick no-op
+
+
+# -- M9 fixes (2026-08-17 pass): sway + throw --------------------------------------
+def _dragged_frames(anchor_x: float, cursor_x: float, seed: int = 3) -> set[str]:
+    core = make_core(seed=seed)
+    core.state.anchor = Vec2(anchor_x, H)
+    core.state.dragging = True
+    core.env.cursor.x, core.env.cursor.y = cursor_x, H
+    core.force_behavior("Dragged")
+    played: set[str] = set()
+    for _ in range(40):
+        core.tick()
+        if core.state.active_frame is not None:
+            played.add(core.state.active_frame.image)
+    return played
+
+
+def test_dragged_sways_toward_cursor():
+    """Swinging the cursor far from the (frozen) grab anchor must play the lean frames
+    (shime9/10), not just the neutral Resisting frames. Requires FootX to resolve and the
+    conditional Pinched branches to be evaluated (both were previously broken)."""
+    right = _dragged_frames(anchor_x=200, cursor_x=600)   # cursor far right of anchor
+    assert "shime9.png" in right, f"expected far-right lean in {sorted(right)}"
+    left = _dragged_frames(anchor_x=1100, cursor_x=300)   # cursor far left of anchor
+    assert "shime10.png" in left, f"expected far-left lean in {sorted(left)}"
+
+
+def test_throw_launches_from_release_position_with_velocity():
+    """A flick release must launch from the synced release anchor (not the stale grab
+    point) and carry the reference's InitialVX overlay. Regression for: ReferenceAction
+    dropped its own overlay attrs (InitialVX was lost → zero horizontal velocity) and the
+    core anchor was frozen at the grab point during the drag."""
+    core = make_core(seed=7)
+    core.state.anchor = Vec2(100, H)      # stale grab point (where the drag started)
+    core.state.dragging = False
+    release_x, release_y = W // 2, H - 250      # user swung up, released mid-air
+    core.state.anchor.x, core.state.anchor.y = release_x, release_y
+    core.env.cursor.dx, core.env.cursor.dy = 12, -10     # px/tick release velocity
+    core.force_behavior("Thrown")
+    max_x = core.state.anchor.x
+    landed = False
+    for _ in range(400):
+        core.tick()
+        max_x = max(max_x, core.state.anchor.x)
+        if core.state.anchor.y >= H - 2:
+            landed = True
+            break
+    assert landed, "throw never reached the floor"
+    assert max_x > release_x + 20, f"throw had no horizontal velocity (max_x={max_x:.0f})"
+    # never snapped back to the stale grab x=100
+    assert core.state.anchor.x > release_x - 5
+
+
+def test_reference_overlay_attrs_reach_target():
+    """An ActionReference's own overlay attrs (InitialVX/TargetX/Duration) must be applied
+    to its target, not dropped. A Walk reference carrying TargetX must actually move."""
+    core = make_core(seed=9)
+    core.state.anchor = Vec2(100, H)
+    core.state.dragging = False
+    core.force_behavior("WalkAlongWorkAreaFloor")   # Walk TargetX=${...} via reference
+    start_x = core.state.anchor.x
+    for _ in range(80):
+        core.tick()
+    assert core.state.anchor.x > start_x + 20, \
+        f"Walk never moved toward its TargetX (start={start_x:.0f} end={core.state.anchor.x:.0f})"

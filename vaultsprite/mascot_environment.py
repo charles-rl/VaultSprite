@@ -353,6 +353,10 @@ class JSMascot(_View):
         return bool(getattr(self._state(), "looking_right", False))
 
     @property
+    def FootX(self):                   # noqa: N802 (Shimeji Dragged/Pinched condition var)
+        return float(getattr(self._state(), "anchor", Vec2()).x)
+
+    @property
     def totalCount(self):              # noqa: N802
         return int(getattr(self._env(), "mascot_count", 1))
 

@@ -56,7 +56,7 @@ class App(QObject):
         self.vault = ObsidianVault(config)
         self.sounds = SoundBank(config)
         self.health = WorkTimer(config)
-        self._mascot_on = bool(config.get("mascot.enabled", False))
+        self._mascot_on = bool(self.config.get("mascot.enabled", False))
         self.mascot = MascotEngine(config, parent=self) if self._mascot_on else None
 
         # keep the terrain callbacks pointed at the live window geometry
@@ -74,7 +74,8 @@ class App(QObject):
         w.drag_released.connect(self._on_drag_released)
         w.drag_started.connect(self._on_drag_started)
         w.clicked.connect(self._on_pet_clicked)
-        w.ask_vision_requested.connect(lambda p: self.agent.ask(p, window_context=self._vision_window_context()))
+        w.ask_vision_requested.connect(
+            lambda p: self._ask_vision(p, window_context=self._vision_window_context()))
         w.stretch_requested.connect(self._trigger_stretch_nudge)
 
         player = w.player
@@ -211,6 +212,8 @@ class App(QObject):
     def _on_drag_started(self):
         self.physics.enable(False)     # freeze gravity while held
         self.stats.pause()             # don't decay mid-interaction
+        x, y = self.window.position()
+        self._debug_log("mascot", f"drag started at ({x},{y})")
         if self.mascot is not None:
             self.mascot.set_dragging(True)
             self.mascot.force_behavior("Dragged")
@@ -228,7 +231,13 @@ class App(QObject):
         if self.mascot is not None:
             self.mascot.set_dragging(False)
             self.mascot.inject_throw(vx, vy)
+            # anchor the throw at the window's actual feet so it launches from where the
+            # user let go (the core anchor was frozen at the grab point during the drag)
+            wx, wy = self.window.position()
+            px = getattr(self.mascot, "_px", 0)
+            self.mascot.sync_anchor(wx + px // 2, wy + px)
             self.mascot.force_behavior("Thrown")
+            self._debug_log("mascot", f"throw released v=({vx:.0f},{vy:.0f}) px/s at ({wx},{wy})")
         else:
             self.physics.release(vx, vy)
 
@@ -315,13 +324,24 @@ class App(QObject):
             return f"[no foreground window title captured; detected context: {bucket}]"
         return f"{title}  [detected context: {bucket}]"
 
+    def _ask_vision(self, prompt: str, window_context: str = ""):
+        """Dispatch a vision ask with immediate on-screen feedback.
+
+        The LLM call runs off-thread (RemoteAgent.ask), but a remote 27B model can take
+        many seconds (cold start / dev-tunnel), which reads as a frozen pet with no
+        indicator. Show an instant "thinking…" bubble so the pet visibly responds the
+        moment you ask; ``_on_agent_reply`` replaces it with the actual reply.
+        """
+        self._say("Thinking\u2026")
+        self.agent.ask(prompt, window_context=window_context)
+
     def _vision_tick(self):
         if self.window.dragging or not self.agent.enabled:
             return
         prompt = ("Look at my screen and, in one short sentence, tell me what I appear "
                   "to be doing right now.")
         logger.debug("autonomous vision ask (context=%s)", self._context_now)
-        self.agent.ask(prompt, window_context=self._vision_window_context())
+        self._ask_vision(prompt, window_context=self._vision_window_context())
 
     def _on_agent_reply(self, text: str):
         if not (text or "").strip():

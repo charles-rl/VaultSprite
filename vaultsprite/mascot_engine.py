@@ -325,16 +325,19 @@ class AnimationAction(Action):      # Stay / Move-ish poses with <Animation> blo
         super().__init__(attrs, core)
         self.anims = anim_list if (anim_list := anim_lists) else []
 
-    # pose selection: first AnimList whose Condition holds (C++ `get_animation`)
+    # pose selection: first AnimList whose Condition holds (C++ `get_animation`).
+    # A literal "true"/"" branch matches unconditionally; any real `#{...}`/`${...}`
+    # expression is evaluated per tick. (The previous `if not is_true_js(cond): continue`
+    # was inverted — it skipped every conditional branch, so Dragged/Pinched's lean poses,
+    # SitAndLookAtMouse, ClimbWall direction, etc. never animated differently.)
     def _current_anim(self) -> Optional[AnimList]:
-        st = self.core.state
         for anim in self.anims:
-            cond = anim.condition_js or "true"
-            if not is_true_js(cond):
-                continue
+            cond = (anim.condition_js or "true").strip()
+            if is_true_js(cond):
+                return anim                      # unconditional branch always matches
             try:
-                v = ExpressionCompiler(strip_js_expr(cond)).eval_value(core_view(self.core),
-                                                                       self.core.rng) if cond != "true" else True
+                v = ExpressionCompiler(strip_js_expr(cond)).eval_value(
+                    core_view(self.core), self.core.rng)
             except Exception:
                 v = False
             if bool(v):
@@ -727,8 +730,14 @@ class ReferenceAction(Action):       # <ActionReference Name=... TargetX=.../> i
         super().init(ctx)
         if self.target is None:
             raise MalformedAction(self.name(), f"unlinked reference (action {self.init_attrs.get('Name')!r} missing)")
+        # The reference's OWN attributes are the overlay for the target (C++ ReferenceAction
+        # passes its vars to the target's init). Before, we forwarded `ctx.extra_attr` — which
+        # is None for a top-level sequence child — so every reference overlay (InitialVX/VY,
+        # TargetX/Y, Duration, Gap, LookRight, ...) was silently dropped. That made Thrown's
+        # InitialVX=${cursor.dx} launch with zero horizontal velocity and broke target-based
+        # Walk/Move/Jump references.
         try:
-            self.target.init(ActionCtx(self.core, ctx.extra_attr))   # attrs overlay onto target
+            self.target.init(ActionCtx(self.core, self.init_attrs))
         except MalformedAction:
             raise
 

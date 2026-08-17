@@ -16,9 +16,11 @@ import io
 import logging
 import os
 import sys
+import threading
+import time
 from typing import Callable, Optional, Union
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from .config import Config, load_config
 
@@ -45,15 +47,33 @@ except ImportError as exc:  # pragma: no cover
     OpenAI = None
 
 
-class _BrainWorker(QObject):
-    """Runs the blocking ``fn`` off the GUI thread; reports via signals."""
+class _BrainThread(QThread):
+    """Runs the blocking ``fn`` off the GUI thread and reports via signals.
+
+    Subclassing ``QThread`` and overriding ``run()`` is the robust way to do this here:
+    ``run()`` always executes in the new OS thread, so the whole blocking capture + LLM
+    call genuinely runs off the GUI thread. The ``finished``/``error`` signals are emitted
+    from that worker thread and delivered back to the GUI thread via queued connections
+    (the receiver lives in the main thread, which runs ``app.exec()``).
+
+    The previous approaches were subtly broken on this PySide6 build and caused the "ask
+    what I see freezes" bug (pet went to a black background and stopped animating):
+    - ``thread.started.connect(lambda: worker.run(fn))`` ran the lambda — and therefore the
+      whole blocking ``fn`` — on the **GUI** thread.
+    - ``thread.started.connect(worker.start)`` (bound slot + ``moveToThread``) never ran
+      reliably without a worker-thread event loop, so replies were silently lost.
+    """
 
     finished = Signal(object)
     error = Signal(str)
 
-    def run(self, fn: Callable[[], object]):
+    def __init__(self, fn: Callable[[], object], parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
         try:
-            self.finished.emit(fn())
+            self.finished.emit(self._fn())
         except Exception as exc:  # noqa: BLE001 - surfaced on `error` signal
             logger.exception("brain worker failed")
             self.error.emit(str(exc))
@@ -196,6 +216,13 @@ class RemoteAgent(QObject):
             return
 
         def _call() -> str:
+            # Diagnostic: confirm the blocking work runs OFF the GUI thread. The GUI thread
+            # is the one that created this RemoteAgent; if these ids ever match (or this log
+            # line blocks), the "ask what I see" freeze is a real GUI-thread/GIL stall rather
+            # than a slow-but-async model reply — investigate, don't assume.
+            logger.info("vision worker starting on thread=%s (gui thread=%s)",
+                        threading.get_ident(), threading.main_thread().ident)
+            t0 = time.monotonic()
             take_shot = screenshot
             if take_shot and self._self_is_foreground():
                 logger.info("pet is foreground; skipping screenshot capture")
@@ -207,16 +234,16 @@ class RemoteAgent(QObject):
                 messages=messages,
                 temperature=0.7,
             )
-            return (resp.choices[0].message.content or "").strip()
+            text = (resp.choices[0].message.content or "").strip()
+            logger.info("vision worker done thread=%s in %.1fs (%d chars)",
+                        threading.get_ident(), time.monotonic() - t0, len(text))
+            return text
 
-        thread = QThread(self)
-        worker = _BrainWorker()
-        worker.moveToThread(thread)
-        thread.started.connect(lambda: worker.run(_call))
-        worker.finished.connect(lambda text: self._deliver(text, thread))
-        worker.error.connect(
+        thread = _BrainThread(_call, parent=self)
+        thread.finished.connect(lambda text: self._deliver(text, thread))
+        thread.error.connect(
             lambda msg: (logger.warning("LLM request failed: %s", msg),
-                         self.error.emit(msg), thread.quit())
+                         self.error.emit(msg))
         )
         thread.start()
 
@@ -224,3 +251,4 @@ class RemoteAgent(QObject):
         logger.info("LLM reply (%d chars): %r", len(text), text[:120])
         self.response_ready.emit(text)
         thread.quit()
+        thread.deleteLater()
