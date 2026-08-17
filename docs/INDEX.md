@@ -32,7 +32,7 @@ All temporary clones have been deleted. **Each module folder is self-contained**
 
 ## Key Findings & Divergences From The Outline (read before implementing)
 
-1. **Module 5 reference changed** (approved 2026-08-16): dead repo `lethee/get_active_window` → `Kalmat/PyWinCtl`. `Implementation Outline.md` updated accordingly. PyWinCtl raises `NotImplementedError` on unsupported platforms — `context_detector.py` must guard the import.
+1. **Module 5 reference changed** (approved 2026-08-16): dead repo `lethee/get_active_window` → `Kalmat/PyWinCtl`. `IMPLEMENTATION_OUTLINE.md` updated accordingly. PyWinCtl raises `NotImplementedError` on unsupported platforms — `context_detector.py` must guard the import.
 2. **Module 3**: DyberPet has no `core/pet.py` and uses **APScheduler** (not `QTimer`/`QThread`); only 2 stats (HP/FV) with a 4-tier ladder. Refactor maps to outline's `QTimer` + 3-stat contract in `stat_engine.py`.
 3. **Module 4**: `akitak1290/desktop-pets` has **no** `Shell_TrayWnd`/gravity — that logic came from the Shimeji-EE family + koishi `pet/action/gravity.py` (research-sourced, URLs in doc). Work-area (`rcWork`) is the recommended floor source.
 4. **Module 6**: koishi uses the **sync `openai` SDK in a `QThread`**, not an async HTTP client; no aiohttp/httpx client exists in the repo. Doc covers both keep-sync and write-async options.

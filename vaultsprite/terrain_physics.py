@@ -69,6 +69,7 @@ class TerrainPhysics(QObject):
         self._vx = 0.0
         self._vy = 0.0
         self._falling = False
+        self._fall_announced = False      # re-arm log fires once per airborne episode
         self._enabled = True
         self._in_flick = False
         # standee tracking (Windows only)
@@ -110,6 +111,7 @@ class TerrainPhysics(QObject):
     def reset_fall_state(self):
         self._falling = False
         self._in_flick = False
+        self._fall_announced = False
         self._vx = 0.0
         self._vy = 0.0
         self._standee = None
@@ -183,6 +185,7 @@ class TerrainPhysics(QObject):
         self._standee = None
         if not self._falling:
             self._falling = True
+            self._fall_announced = True
             logger.info("apply_impulse vx=%.1f vy=%.1f px/tick", self._vx, self._vy)
             self.falling_started.emit()
 
@@ -212,6 +215,7 @@ class TerrainPhysics(QObject):
         floor_now = self.get_floor_line(x)
         if not self._falling and y + h < floor_now - 2:
             self._falling = True
+            self._fall_announced = True
             logger.info("pet is floating above floor at x=%d; falling", x)
             self.falling_started.emit()
 
@@ -223,14 +227,21 @@ class TerrainPhysics(QObject):
         new_y = y + self._vy
         new_x = x + self._vx
 
-        # walls (clamp within work area + bounce)
+        # walls + top edge (clamp within work area with bounce) — keeps the pet on-screen
+        # while airborne so an up-flick can't launch it past the screen top and leave it
+        # falling back from off-display. ``wall_bounce`` is already negative, so a single
+        # multiplication flips the velocity sign (the old double negation kept the pet
+        # glued to / pushing into side walls).
         screen = QApplication.primaryScreen()
         if screen is not None:
             geo = screen.availableGeometry()
+            min_y, max_x = geo.top(), geo.right() - w
             if new_x <= geo.left():
-                new_x, self._vx = geo.left(), -self._vx * self._wall_bounce
-            elif new_x >= geo.right() - w:
-                new_x, self._vx = geo.right() - w, -self._vx * self._wall_bounce
+                new_x, self._vx = geo.left(), self._vx * self._wall_bounce
+            elif new_x >= max_x:
+                new_x, self._vx = max_x, self._vx * self._wall_bounce
+            if new_y <= min_y and self._vy < 0:      # hit the top edge → fall back down
+                new_y, self._vy = min_y, self._vy * self._wall_bounce
 
         floor = self.get_floor_line(new_x)          # desktop surface (work-area bottom)
         effective_bottom = floor
@@ -253,6 +264,7 @@ class TerrainPhysics(QObject):
             self._move_to(int(new_x), landed_y)
             self._falling = False
             self._vy = 0.0
+            self._fall_announced = False
             # horizontal drift keeps the pet walking a little after touchdown
             self.landed.emit(int(new_x), landed_y)
         else:

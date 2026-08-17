@@ -8,8 +8,8 @@ app:
   log_level: INFO
 
 window:
-  width: 128            # overlay window size in logical px
-  height: 128
+  width: 89             # overlay window size in logical px (~0.7× the original 128; sprite scales to this)
+  height: 89
   fps: 20               # animation tick rate (frame-slicer timer)
   drag_threshold_px: 5      # press travel before a click becomes a drag (Manhattan distance)
   click_timeout_ms: 200     # no-move window that confirms a single click
@@ -35,7 +35,7 @@ physics:
   max_speed: 25.0                # px/tick hard cap (any axis)
   fall_terminal: 8.0             # explicit terminal falling speed, px/tick
   wall_bounce: -0.4              # x-velocity reflection at screen walls
-  impulse_scale: 0.05            # converts release flick px/s to px/tick
+  impulse_scale: 0.1             # converts release flick px/s to px/tick (doubled for a stronger throw)
   stand_on_windows: true         # land on foreground-window top edges (Windows only)
 
 context:
@@ -47,7 +47,7 @@ context:
 
 remote:
   ollama_base_url: http://localhost:11434/v1   # OpenAI-compatible; append /chat/completions
-  ollama_model: qwen2.5:27b                    # Qwen 27B per outline; VLM id for vision builds
+  ollama_model: hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL   # verified via `ollama ls`; OLLAMA_MODEL env overrides
   llm_timeout_s: 120                           # generous read timeout (remote H100)
   vision_enabled: true
   screenshot:

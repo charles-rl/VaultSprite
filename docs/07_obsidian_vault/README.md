@@ -4,7 +4,7 @@
 
 Provides atomic Markdown read/write into an Obsidian vault: facts to `Memory/Facts/`, events to `Memory/Events/`, and a daily journal `Journal/YYYY-MM-DD.md`. Writes are **atomic** (same-dir dot-temp + `Path.replace`), with YAML frontmatter fronting each file. No Obsidian plugin dependency.
 
-Maps to **Module 7** of `Implementation Outline.md`; produces `obsidian_vault.py` with API `write_fact(category, key, value)` and `append_journal(entry)`.
+Maps to **Module 7** of `IMPLEMENTATION_OUTLINE.md`; produces `obsidian_vault.py` with API `write_fact(category, key, value)` and `append_journal(entry)`.
 
 Extraction source: **`jrcruciani/obsidian-memory-for-ai`** (SPEC-v4 + reference Python tools):
 - `SPEC-v4.md` — canonical directory tree + frontmatter schemas + invariants.

@@ -25,7 +25,7 @@ def test_app_boots_and_wires(qapp, tmp_path):
     # every module constructed and cross-referenced
     assert isinstance(app.fsm.current_state, str)
     assert app.physics._position is not None               # mover injected
-    assert app.agent.model == "qwen2.5:27b"                # from config
+    assert app.agent.model == "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"                # from config
     assert app.health.threshold_minutes == 1
 
     # initial animation state played through the window

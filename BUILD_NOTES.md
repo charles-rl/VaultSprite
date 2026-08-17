@@ -7,7 +7,8 @@ while implementing. Read this before touching code — several items here only m
 sense because of PySide6 6.11 build quirks found empirically on this box.
 
 Built: Python 3.13 (uv), Linux dev box, offscreen Qt validation. Target: Windows 11.
-Status at time of writing: **72 tests passing, `--smoke` exit 0, render check PASS.**
+Status at time of writing: **74 tests passing, `--smoke` exit 0, render check PASS.**
+(2026-08-17 maintenance pass added the two M4 airborne-clamp tests; see §9.)
 Nothing is committed yet — the entire tree is untracked in git (greenfield repo).
 
 ---
@@ -40,7 +41,7 @@ tools/generate_assets.py  deterministic-ish asset generator (RNG seed 42 for dra
 tools/render_check.py     offscreen boot → composites live frame, asserts transparency by
                           checking corners stay pure magenta, pixel-diffs two captures ~1.4 s
                           apart to prove QMovie is advancing; writes /tmp/vaultsprite_render.png
-tests/                    72 tests, all offscreen-safe (conftest: qapp fixture + FakeConfig)
+tests/                    74 tests, all offscreen-safe (conftest: qapp fixture + FakeConfig)
 ```
 
 Run commands (see AGENTS.md for the canonical list): `uv run vaultsprite`,
@@ -159,6 +160,11 @@ no-op on Windows (guarded by `os.name != "nt"`).
   / `.MouseMove` (NOT `…PressEvent`), and `QMouseEvent` requires the 7-arg constructor
   `(type, localPos, scenePos, globalPos, button, buttons, modifiers)` — see
   `tests/test_ui_overlay.py::_evt` for a working template.
+- **SpeechBubble height is lineSpacing-based** (2026-08-17): `ascent + (n-1)*lineSpacing + descent +
+  pads`. The old `fm.height()*lines + 22` under-sized wrapped text by up to a partial line, so the
+  last line's lower half was clipped at the widget edge — on-screen it looked like the sentence just
+  stopped mid-word (reported as "roll your" with nothing after). `paintEvent`'s draw rect uses the
+  same pads; keep them in sync if you touch either side.
 
 ### M3 stat_engine
 - `_tick()` applies decay **then** evaluates thresholds per stat (order matters: the first version
@@ -176,6 +182,14 @@ no-op on Windows (guarded by `os.name != "nt"`).
   because the window only emits `drag_released` (no separate plain-drop signal). It means *any*
   time you position() the window mid-air with physics enabled, it settles — convenient for tests
   and drag-to-reposition, harmless otherwise.
+- **Flight is clamped to the work area**: `_tick()` bounces the pet off side walls *and* the top
+  edge (`wall_bounce`, single multiplication — see fix below) and never lets it leave the screen
+  while airborne. Without this, an up-flick launched the pet above the display; it then fell back
+  from thousands of px at terminal velocity (perceived "infinite falling" + a re-arm log line every
+  tick). The re-arm `logger.info` now fires once per airborne episode (`_fall_announced`, cleared on
+  landing/grounded). **Bug fix 2026-08-17**: the wall bounce was `-vx * -0.4 = +0.4 vx` — same sign,
+  so a throw into a side wall left the pet glued to / pushing through it forever; tests
+  `test_wall_bounce_reverses_velocity` and `test_upward_flick_clamps_at_screen_top_and_lands` pin this.
 - **`release(vx, vy)` re-enables the world** (`enable(True)`, since `drag_started` disabled it) and
   calls `apply_impulse` **only when speed > `window.flick_speed_threshold` (80 px/s)**. Slower
   releases are plain drops. An earlier version applied a minimum liftoff impulse to *any* non-zero
@@ -217,6 +231,10 @@ no-op on Windows (guarded by `os.name != "nt"`).
   base64 `data:` URI inside the OpenAI content-list format `[{"type":"text"...},{"type":"image_url","image_url":{"url": ...}}]`.
   If capture returns None (headless), payload degrades to plain-text user message. mss API drift is
   handled (`mss.MSS` preferred, `mss.mss()` fallback).
+- **Model id**: config ships `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL` (verified with `ollama ls`;
+  the old outline-era default was `qwen2.5:27b`, which is *not* what's installed on this machine).
+  The OpenAI-compat payload is model-agnostic, so no other code changes were needed; tests pin the
+  new id via FakeConfig/real-config layers (see `test_remote_agent.py`).
 - **Autonomous loop** lives in App (not RemoteAgent): QTimer at `remote.ask_interval_ms` (default
   300000 ms = 5 min), starts only when >0 AND `agent.enabled`. If the H100 is unreachable you get a
   repeating log line "vision note: …" — there's no backoff/retry yet.
@@ -309,6 +327,27 @@ no-op on Windows (guarded by `os.name != "nt"`).
   if imports mysteriously "only work from the repo root", this key got lost. `uv sync --extra dev`.
 - System X libs for offscreen Qt are apt-installed (§1 note). Audio: SDL mixer is unavailable here →
   SoundBank no-op (expected, tested as such).
-- Image files can't be read by *this* model session (no vision input available in practice), so all
-  visual QA has been numeric (alpha probes over magenta, pixel diffs). If you have vision, eyeball
-  `tools/render_check.py` output at `/tmp/vaultsprite_render.png`; don't force the check.
+- Image files CAN be read by this session's build agent (native image input — confirmed 2026-08-17:
+  it eyeballed `sprite_test.png` and the offscreen renders directly). Visual QA is therefore both
+  numeric (alpha probes over magenta, pixel diffs) **and** direct inspection of
+  `/tmp/vaultsprite_render.png`; no helper scripts or remote-VLM round trips needed for image checks.
+
+## 9. Changelog
+
+### 2026-08-17 — user-feedback maintenance pass (commit after `7d35f4e`)
+Addressed the report in `USER_NOTES.md` (then rewritten as a resolution log):
+1. **Model**: `remote.ollama_model` → `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL` (`config.yaml`,
+   `remote_agent.py` fallback, 4 test pins, docs/06). Verified with `ollama ls`; the old `qwen2.5:27b`
+   is not installed here — which also explains why no vision replies ever surfaced (see item 8 in
+   USER_NOTES.md on the "can't see stats" symptom).
+2. **Sprite size ×~0.7**: `window.width/height` 128 → 89 (`config.yaml`; test assertion updated).
+3. **Throw force ≈2×**: `physics.impulse_scale` 0.05 → 0.1 (caps untouched: `max_speed`, `fall_terminal`).
+4. **Physics bug fixes** (§3-M4): wall-bounce sign flipped to a real rebound; flight clamped to the
+   work area incl. top edge (no more off-screen-top infinite fall); re-arm log once per episode.
+5. **SpeechBubble**: lineSpacing-based height + matching draw pads — wrapped lines no longer clip
+   their lower half (§3-M1 trap). Stretch-bubble copy shortened so it fits one line.
+6. **Housekeeping**: `Implementation Outline.md` → `IMPLEMENTATION_OUTLINE.md` in all 13 citations;
+   deleted `sprite_test.png`/`test_vision.py` (vision is native now); vision test image was a chibi
+   guitarist sticker — potential future sprite identity, but assets are untouched this pass.
+Stats HUD: deliberately **not** added (user hypothesis that invisible replies masked everything checks
+out; revisit if stats still need on-screen display).

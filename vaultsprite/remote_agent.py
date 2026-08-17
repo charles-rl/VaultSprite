@@ -72,7 +72,8 @@ class RemoteAgent(QObject):
 
         base_url = str(c.get("ollama_base_url", "http://localhost:11434/v1"))
         self.base_url = base_url if base_url.endswith("/") else base_url + "/"
-        self.model = str(c.get("ollama_model", "qwen2.5:27b"))
+        self.model = str(c.get(
+            "ollama_model", "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"))
         timeout = float(c.get("llm_timeout_s", 120))   # generous for a remote H100
         self.vision_enabled = bool(c.get("vision_enabled", True))
 

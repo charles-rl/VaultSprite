@@ -4,7 +4,7 @@
 
 Provides non-blocking 8-bit sound triggers (preloaded `.wav` files: `step.wav`, `chirp.wav`, `yawn.wav`) and an active-work timer that — after 45–60 min of continuous work — forces the FSM to `stretch_nudge`, plays `chirp.wav`, and surfaces a health prompt.
 
-Maps to **Module 8** of `Implementation Outline.md`; produces `health_audio.py`.
+Maps to **Module 8** of `IMPLEMENTATION_OUTLINE.md`; produces `health_audio.py`.
 
 Extraction sources:
 - **`pieterdd/StretchBreak`** — the work-timer state machine + non-blocking sound trigger pattern. **This repo is Rust (GTK4/relm4 + rodio), not Python, and has no `pygame.mixer`.** We extract the *patterns* (non-blocking playback path, idle-based break arming, skip-vs-postpone) and pair them with the canonical `pygame.mixer` recipe (researched from the official pygame/`pygame-ce` docs).

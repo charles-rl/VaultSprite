@@ -60,7 +60,7 @@ def test_transparent_flags(window):
 
 
 def test_fixed_size_matches_config(window):
-    assert window.width() == 128 and window.height() == 128   # config.yaml defaults
+    assert window.width() == 89 and window.height() == 89     # config.yaml (~0.7× the old 128)
     assert window.pet_label is not None
     x, y = window.position()
     assert (x, y) >= (0, 0)

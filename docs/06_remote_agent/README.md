@@ -4,7 +4,7 @@
 
 Captures a downscaled screenshot of the desktop, base64-encodes it, and builds an OpenAI-compatible `/v1/chat/completions` payload (text + `image_url` with a `data:` URI) to dispatch to a **remote H100 Ollama endpoint** (`http://<H100_IP>:11434/v1/chat/completions`, Qwen 27B). Runs asynchronously so the GUI/FSM never blocks.
 
-Maps to **Module 6** of `Implementation Outline.md`; produces `remote_agent.py`.
+Maps to **Module 6** of `IMPLEMENTATION_OUTLINE.md`; produces `remote_agent.py`.
 
 Extraction source: **`Koishi007/koishi-ai-pet`** — `pet/agent/screen_reader.py` (capture/downscale/base64) + `pet/brain/llm_client.py` (client construction) + `pet/brain/context_builder.py` (message/payload assembly).
 
@@ -250,7 +250,7 @@ Step-by-step:
 1. **Configuration** (config.py):
    ```python
    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-   OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:27b")     # Qwen 27B per outline
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL")  # verified via `ollama ls` (was qwen2.5:27b)
    LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))          # remote H100 → generous read timeout
    VISION_ENABLED = bool(os.getenv("VISION_ENABLED", "1"))
    SCREENSHOT_MAX_PX = 1024 * 768                               # our downscale target

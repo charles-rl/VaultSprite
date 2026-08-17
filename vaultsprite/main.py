@@ -1,7 +1,7 @@
 """VaultSprite main entry point.
 
 Assembles the eight decoupled modules and wires them together with PySide6
-signals/slots (see ``Implementation Outline.md`` "System Architecture Flow").
+signals/slots (see ``IMPLEMENTATION_OUTLINE.md`` "System Architecture Flow").
 The :class:`App` class is the single owner of animation-state transitions: it is
 the only thing that calls ``fsm.get_next_state`` / ``force_state``, driven by the
 sprite player's ``state_finished`` plus external forces (drag/flick, stat
@@ -205,7 +205,7 @@ class App(QObject):
         t = self.fsm.force_state("stretch_nudge")
         self._play(t)
         self.sounds.play("chirp")
-        self._say("Stretch break! Stand up, roll your shoulders...")
+        self._say("Stretch break! Stand up and move.")
         try:
             from datetime import datetime, timezone
             self.vault.write_fact("health", "last_stretch",

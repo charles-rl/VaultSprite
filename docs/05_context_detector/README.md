@@ -4,7 +4,7 @@
 
 Detects which application currently has focus and classifies it as **WORK** or **PLAY** based on keyword lists, emitting a `context_changed(str)` signal from a lightweight background thread. The stat engine (M3) and health module (M8) use the classification (e.g. only decay/accumulate work-time in a WORK context).
 
-Maps to **Module 5** of `Implementation Outline.md`; produces `context_detector.py`.
+Maps to **Module 5** of `IMPLEMENTATION_OUTLINE.md`; produces `context_detector.py`.
 
 Extraction source: **`Kalmat/PyWinCtl`** (cross-platform window control; Win32 backend under the hood). Key files:
 - `src/pywinctl/_pywinctl_win.py` — `getActiveWindow()` / `getActiveWindowTitle()`, `.title`, `.isActive` (the `GetForegroundWindow`/`GetWindowText` call sites).

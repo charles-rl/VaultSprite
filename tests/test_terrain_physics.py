@@ -123,3 +123,37 @@ def test_release_slow_is_plain_drop(world):
             break
         ticks += 1
     assert landed, "slow release never settled"
+
+
+def test_wall_bounce_reverses_velocity(world):
+    """A throw into a side wall must rebound inward. (Old code double-negated the
+    bounce and left the pet glued to / pushing through the wall forever.)"""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    vp.x, vp.y = int(geo.left()), int(geo.top()) + 50     # high up, against the left wall
+    phys.apply_impulse(vx_px_s=-300.0, vy_px_s=10.0)      # hard push straight into the wall
+    assert phys.falling
+    for _ in range(4):
+        phys._tick()
+    assert vp.x > int(geo.left()), "pet must rebound away from the wall it hit"
+
+
+def test_upward_flick_clamps_at_screen_top_and_lands(world):
+    """An up-flick from near the screen top used to fling the pet off-display, where
+    it fell back slowly (and re-logged every tick). Now flight is clamped to the
+    work area: it bounces off the top edge and lands on-screen."""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    vp.x, vp.y = int(geo.left()) + 300, int(geo.top())    # dragged up to the very top
+    landed: list[tuple[int, int]] = []
+    phys.landed.connect(lambda x, y: landed.append((x, y)))
+    min_y = float("inf")
+    phys.apply_impulse(vx_px_s=-60.0, vy_px_s=-2000.0)    # hard throw straight up
+    assert phys.falling
+    ticks = 0
+    while not landed and ticks < 600:
+        phys._tick()
+        min_y = min(min_y, vp.y)
+        ticks += 1
+    assert landed, "pet never landed after an upward flick"
+    assert int(min_y) >= int(geo.top()), "pet left the screen top while airborne"

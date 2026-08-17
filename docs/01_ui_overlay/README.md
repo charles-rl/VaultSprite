@@ -2,7 +2,7 @@
 
 ## 1. Module Overview & Objective
 
-Provides the desktop-pet surface: a frameless, always-on-top, fully transparent PySide6 window that renders the sprite and can be repositioned by click-and-drag. Maps to **Module 1** of `Implementation Outline.md` and the `ui_overlay.py` node in the system-architecture diagram (the top-level entry point every other module talks to).
+Provides the desktop-pet surface: a frameless, always-on-top, fully transparent PySide6 window that renders the sprite and can be repositioned by click-and-drag. Maps to **Module 1** of `IMPLEMENTATION_OUTLINE.md` and the `ui_overlay.py` node in the system-architecture diagram (the top-level entry point every other module talks to).
 
 Extraction source: **`Koishi007/koishi-ai-pet`** (PySide6, pinned `PySide6==6.11.1`).
 

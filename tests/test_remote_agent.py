@@ -14,7 +14,7 @@ from vaultsprite.remote_agent import RemoteAgent
 def agent(qapp):
     cfg = FakeConfig({
         "remote.ollama_base_url": "http://10.0.0.7:11434/v1",   # H100 via config, not hardcoded
-        "remote.ollama_model": "qwen2.5:27b",
+        "remote.ollama_model": "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL",
         "remote.ask_interval_ms": 0,                              # loop off in unit tests
     })
     return RemoteAgent(cfg)
@@ -23,7 +23,7 @@ def agent(qapp):
 # -- payload construction -----------------------------------------------------------
 def test_base_url_and_timeout_from_config(agent):
     assert agent.base_url == "http://10.0.0.7:11434/v1/"         # trailing slash appended
-    assert agent.model == "qwen2.5:27b"
+    assert agent.model == "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"
 
 
 def test_text_only_payload_shape(agent, monkeypatch):
@@ -89,7 +89,7 @@ def test_ask_dispatches_and_delivers(qapp, agent):
     assert spin(qapp, lambda: replies or errors), f"no reply; errors={errors}"
     assert not errors
     assert replies[0] == base_reply            # delivered back on the GUI thread
-    assert fired_prompt["model"] == "qwen2.5:27b"
+    assert fired_prompt["model"] == "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"
     assert fired_prompt["n_messages"] == 2     # system + user
 
 

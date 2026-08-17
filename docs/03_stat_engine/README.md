@@ -4,7 +4,7 @@
 
 Provides the background time-driven decay of pet stats (Hunger/Satiety, Energy, Boredom) and emits PySide6 signals when a stat crosses a critical level (e.g. boredom > 80). The FSM (M2) and health module (M8) subscribe to those signals to change pet behavior.
 
-Maps to **Module 3** of `Implementation Outline.md`; produces `stat_engine.py`. The directive is to strip DyberPet's shop, inventory, GUI menus, pomodoro/task/dashboard systems and keep *only* the decay math + threshold signalling.
+Maps to **Module 3** of `IMPLEMENTATION_OUTLINE.md`; produces `stat_engine.py`. The directive is to strip DyberPet's shop, inventory, GUI menus, pomodoro/task/dashboard systems and keep *only* the decay math + threshold signalling.
 
 Extraction source: **`ChaozhongLiu/DyberPet`** (PySide2-era project). Key files: `DyberPet/settings.py` (constants), `DyberPet/modules.py` (`Scheduler_worker`, `change_hp`/`change_fv`), `DyberPet/DyberPet.py` (`DP_HpBar.updateValue`, `_change_status`).
 

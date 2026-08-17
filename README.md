@@ -1,6 +1,6 @@
 # VaultSprite
 
-PySide6 desktop pet: a transparent always-on-top mascot that walks your taskbar, decays in needs, senses work-vs-play context, watches your screen via a remote Ollama endpoint (Qwen), and journals its life into an Obsidian vault. Built per `Implementation Outline.md` from the extraction docs in `docs/`.
+PySide6 desktop pet: a transparent always-on-top mascot that walks your taskbar, decays in needs, senses work-vs-play context, watches your screen via a remote Ollama endpoint (Qwen), and journals its life into an Obsidian vault. Built per `IMPLEMENTATION_OUTLINE.md` from the extraction docs in `docs/`.
 
 ## Quick start — getting it running on your PC
 

@@ -4,7 +4,7 @@
 
 Implements the probabilistic finite-state machine that picks which sprite animation to play next. A `config.json` schema declares states (`idle`, `walking`, `sleeping`, `talking`, …), each with sprite GIF, frame dims, optional per-frame movement vector `[dx, dy]`, and a weighted `transitions_to` table. When a state's frames finish, the next state is drawn from those weights.
 
-Maps to **Module 2** of `Implementation Outline.md`; produces `animation_fsm.py` with a `get_next_state()` method returning the next sprite asset, duration, and position offsets.
+Maps to **Module 2** of `IMPLEMENTATION_OUTLINE.md`; produces `animation_fsm.py` with a `get_next_state()` method returning the next sprite asset, duration, and position offsets.
 
 Extraction source: **`Shirros/desktop-pet`** (Tkinter app; we port the *logic* into PySide6). Key files: `util.py` (weighted random), `pet.py` (state machine), `main.py` (drive loop), `assets/cave_chaos/config.json` (schema).
 

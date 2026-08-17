@@ -147,6 +147,7 @@ class SpeechBubble(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self._text = ""
+        self._lines: list[str] = []            # pre-wrapped; drawn line-by-line below
         self._font = QFont()
         self._font.setPixelSize(13)
         self._fm = QFontMetrics(self._font)
@@ -159,6 +160,9 @@ class SpeechBubble(QWidget):
             return
         self._text = " ".join(text.split())[:400]
         fm = self._fm
+        # word-wrap ourselves and draw each line at an explicit baseline (paintEvent) —
+        # Qt's own re-wrap inside a padded rect can produce MORE lines than our advance-
+        # based wrap predicts (font rounding), which is what clipped the last line before.
         words, lines, cur = self._text.split(" "), [], ""
         for word in words:
             trial = (cur + " " + word).strip()
@@ -169,9 +173,15 @@ class SpeechBubble(QWidget):
                 cur = trial
         if cur:
             lines.append(cur)
+        self._lines = lines
         width = min(self.MAX_W,
                     max(90, max((fm.horizontalAdvance(l) for l in lines), default=60)) + 24)
-        height = fm.height() * len(lines) + 22
+        # Multi-line-safe height: full line boxes (lineSpacing each), plus the last
+        # line's descent. The old fm.height()*n under-sized wrapped text by a partial
+        # line, clipping its lower half (looked like "text just stops mid-sentence").
+        top_pad, bot_pad = 9, 13
+        height = (fm.ascent() + (len(lines) - 1) * fm.lineSpacing()
+                  + fm.descent() + top_pad + bot_pad)
         self.setFixedSize(int(width), int(height))
         self.raise_()
         self.show()
@@ -206,9 +216,14 @@ class SpeechBubble(QWidget):
         painter.drawPath(tail)
         painter.setPen(QColor(30, 47, 88))
         painter.setFont(self._font)
-        painter.drawText(rect.adjusted(12, 10, -12, -10),
-                         Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
-                         self._text)
+        # draw each pre-wrapped line at an explicit baseline — deterministic layout that
+        # matches show_text()'s geometry exactly (no in-rect re-wrap to surprise us)
+        fm = self._fm
+        base_x = rect.left() + 12
+        base_y = rect.top() + 9 + fm.ascent()     # mirrors show_text()'s top pad
+        for line in self._lines:
+            painter.drawText(int(base_x), int(base_y), line)
+            base_y += fm.lineSpacing()
 
 
 # ---------------------------------------------------------------------------

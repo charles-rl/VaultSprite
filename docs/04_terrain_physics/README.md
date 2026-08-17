@@ -4,7 +4,7 @@
 
 Computes the desktop "terrain" the pet walks on: the floor line (taskbar top / monitor work-area bottom), optional standing on the active window's top edge, wall/ceiling bounds, and **Y-axis gravity** applied when a drag is released above the floor. Drives the sprite's `Y` position during fall states until `Y_pet ≥ Y_floor`.
 
-Maps to **Module 4** of `Implementation Outline.md`; produces `terrain_physics.py` (a lightweight PyWin32 wrapper + fall simulation). Because the Linux dev box has no Win32, all win32 imports must be guarded/mocked.
+Maps to **Module 4** of `IMPLEMENTATION_OUTLINE.md`; produces `terrain_physics.py` (a lightweight PyWin32 wrapper + fall simulation). Because the Linux dev box has no Win32, all win32 imports must be guarded/mocked.
 
 Extraction sources:
 - **`akitak1290/desktop-pets`** (`pets.py`, tkinter): work-area bounds query + tick-based move/clamp/floor-snap loop. **Lacks** `Shell_TrayWnd` and gravity acceleration.
@@ -244,6 +244,11 @@ Step-by-step:
 5. **Drop from the reference**: the tkinter canvas/renderer (desktop-pets), shop/inventory (N/A here), and koishi's action-queue coupling. Keep only math + signals.
 6. **Preserve the constants as module-level tuning knobs**: `GRAVITY_ACCEL`, `FALL_TERMINAL`, `FRICTION`, `WALL_BOUNCE`, `TICK_MS` (30), `FEET_RATIO` (1/3).
 7. **Testing**: with win32 mocked, drive `FallSimulation` with a fake `move_to` recorder and a fake floor; assert: fall accelerates to terminal velocity, snaps exactly on the floor, never tunnels through a window top (sweep test), and emits `landed` exactly once. All headless (QCoreApplication + manual tick calls).
+
+**Implementation divergences from this spec (as shipped — see BUILD_NOTES §9):**
+- `impulse_scale` ships at **0.1** (config), not 0.05 — a user-requested ≈2× stronger throw. Caps (`max_speed`, `fall_terminal`) are untouched.
+- Wall bounce is applied as a **single multiplication** by the negative constant (`v * wall_bounce`); an early port double-negated it and left thrown pets glued to side walls (fixed 2026-08-17).
+- The tick loop also clamps flight at the **top edge** of the work area (same bounce) so an up-flick can't eject the pet above the screen; the "floating above floor" re-arm log fires once per airborne episode.
 
 ## 6. Source Files (Reference Copies)
 
