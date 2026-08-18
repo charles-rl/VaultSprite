@@ -98,6 +98,7 @@ class App(QObject):
             self.mascot.frame_changed.connect(self.window.render_mascot_frame)
             self.mascot.position_changed.connect(self.window.move_to)
             self.mascot.behavior_changed.connect(self._on_mascot_behavior)
+            self.mascot.debug_log.connect(lambda line: self._debug_log("mascot", line))
             if bool(self.config.get("debug.telemetry_overlay", False)):
                 self._overlay = TelemetryOverlay()
                 self._overlay.start(self._mascot_telemetry)
@@ -507,6 +508,11 @@ class App(QObject):
         self.window.set_scale(factor)
         if self.mascot is not None:
             self.mascot._px = new_px
+            # A resize mid-animation would leave the pet floating/jumping (the engine
+            # keeps its old anchor/behavior); replay the spawn flourish + drop so it
+            # visibly settles on the floor (unless the pet is hidden away).
+            if not self._hidden:
+                self.mascot.respawn()
 
     def _on_behavior_toggled(self, name: str, exclude: bool):
         if self.mascot is not None:

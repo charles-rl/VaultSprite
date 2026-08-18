@@ -505,6 +505,36 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ## 9. Changelog
 
+### 2026-08-18 — Feedback pass: on-screen clamp, throw smoothing, scale respawn, richer logs (137 tests)
+Addresses the "Recent User Feedback" block in `USER_FEEDBACK.md` (fling off-screen, ceiling vanish,
+scale-change glitch, throw jitter, config docs). Sway tuning was deliberately left to the user
+(hardcoded in `mascot_actions.py:_DraggableAction.step`; no config key added).
+1. **On-screen clamp for M9** (`mascot_engine_widget.py:_clamp_pos`). Root cause: `window.move_to`
+   (ui_overlay.py) had no clamp — `_clamp` was only used by init/drag — so the engine's Dash/Move
+   toward `cursor.x`/a large `Math.random` TargetX walked the pet off the monitor forever, and
+   `FallAction`'s ceiling clamp put the feet at `ceiling.y` → window top = `-px` → pet invisible
+   ("climbed up and vanished"). `_clamp_pos` keeps the whole sprite inside `availableGeometry()`
+   (guarded by `not dragging and not hide_walking`; hide/show still goes off-screen on purpose).
+2. **Throw smoothing via interpolation** (new `mascot.smooth_motion: true`). A 25 Hz engine tick
+   moved the window once per 40 ms in discrete steps (fall terminal = 20 px/tick ≈ 22% of the 89 px
+   sprite; flick launch tens+ of px) → "frame-by-frame" judder on a 144 Hz monitor. A fast
+   interpolation timer (tick_ms/4) eases the window between successive engine targets
+   (`_set_target`/`_interp_step`, smoothstep). Physics/behavior clock is unchanged; only
+   presentation is smoothed. Core (pure Python) untouched.
+3. **Scale-change respawn** (`MascotEngine.respawn()` + `App._on_scale_changed`). Resize kept the
+   engine's old anchor/behavior → floating/glitchy. Now recentres the anchor on the floor and
+   forces the pack's `PullUpShimeji` breed-gag flourish (frames 38-41 + jump + fall + bounce; falls
+   back to a plain `Fall` for packs without it). Skipped while the pet is hidden.
+4. **Richer debug trails** — new `debug_log = Signal(str)` on `MascotEngine` (wired to
+   `App._debug_log("mascot", …)`); `_maybe_debug` emits a throttled (~1 Hz) anchor/behavior/frame/
+   work-area line so future "why did it leave/stop" reports are diagnosable from `Memory/Debug/`.
+5. **Docs** — README gained a "Configuring VaultSprite" section (critical `config.yaml` keys) and the
+   stale "M9 not yet live" claim was corrected; config.yaml clarifies `window.fps` (legacy-only) vs
+   `mascot.tick_ms` (M9).
+Tests: **137 pass**, `--smoke` exit 0, `tools/render_check.py` PASS. New regressions in
+`tests/test_app_integration.py`: clamp off-screen targets, interpolation subdivides moves, respawn
+recentres + forces breed gag, scale-change triggers respawn (skipped when hidden).
+
 ### 2026-08-18 — M9 code-review pass: 10 verified bugs fixed (throw launch, landing latch, climbing, Select block, truthiness, robustness)
 Cross-verified by three independent `@explore` subagents against the `DalekCraft2/Shimeji-Desktop`
 Java reference, then confirmed by live probes (suite 122 → **133**; `--smoke` exit 0). Full findings

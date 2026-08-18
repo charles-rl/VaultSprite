@@ -37,6 +37,7 @@ class MascotEngine(QObject):
     frame_changed = Signal(QPixmap)
     behavior_changed = Signal(str)
     position_changed = Signal(int, int)
+    debug_log = Signal(str)
 
     def __init__(self, config: Optional[Config] = None, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -90,6 +91,23 @@ class MascotEngine(QObject):
         self._pending_dx = 0.0
         self._pending_dy = 0.0
 
+        # Smooth on-screen motion: the engine tick moves the window in discrete
+        # multi-pixel steps (25 Hz at tick_ms 40) which reads as "frame-by-frame"
+        # judder on high-refresh monitors. A fast interpolation timer lerps the
+        # window between successive engine targets so motion looks continuous
+        # while the physics/behavior clock stays on its own tick. Config
+        # ``mascot.smooth_motion`` (default true) turns this off if ever needed.
+        self._smooth = bool(m.get("smooth_motion", True))
+        self._interp_from = (0, 0)
+        self._interp_to: Optional[tuple[int, int]] = None
+        self._interp_elapsed = 0
+        self._interp_total = max(1, self.tick_ms)
+        self._pos_cur: Optional[tuple[int, int]] = None
+        self._interp_timer = QTimer(self)
+        self._interp_timer.setInterval(max(5, self.tick_ms // 4))
+        self._interp_timer.timeout.connect(self._interp_step)
+        self._debug_counter = 0
+
         self._timer = QTimer(self)
         self._timer.setInterval(self.tick_ms)
         self._timer.timeout.connect(self._tick)
@@ -137,13 +155,18 @@ class MascotEngine(QObject):
             self._tick()
             if self._rendered_frame:
                 break
+        st = self.core.state
+        self._pos_cur = (int(st.anchor.x) - self._px // 2, int(st.anchor.y) - self._px)
         self._timer.start()
 
     def stop(self):
         self._timer.stop()
+        self._stop_interp()
 
     def set_dragging(self, dragging: bool):
         self._dragging = dragging
+        if dragging:
+            self._stop_interp()
         if self.core:
             self.core.state.dragging = dragging
 
@@ -157,6 +180,8 @@ class MascotEngine(QObject):
         manual stepping. ``active=False`` stops the walk and leaves the timer state to
         the caller (usually a subsequent :meth:`set_hidden`)."""
         self._hide_walking = bool(active)
+        if active:
+            self._stop_interp()          # App owns the window while walking; no lerp
         if not self.core:
             return
         self.core.state.looking_right = bool(moving_right)
@@ -189,6 +214,7 @@ class MascotEngine(QObject):
         (unlike :meth:`start`, which puts a fresh pet at floor center)."""
         if hidden:
             self._timer.stop()
+            self._stop_interp()
             return
         if self._timer.isActive() or not self.core:
             return
@@ -226,6 +252,24 @@ class MascotEngine(QObject):
         self._pending_dx = vx_px_s / ticks
         self._pending_dy = vy_px_s / ticks
         self._pending_throw = True
+
+    def respawn(self):
+        """Re-settle the pet after an external resize (tray scale control).
+
+        The scale change only updates ``_px``; the engine keeps its old anchor/behavior,
+        so a resized pet can float mid-air or jump off-screen. This recentres the anchor
+        on the floor and replays the pack's ``PullUpShimeji`` "spawned a new version"
+        flourish (breed gag frames 38-41 + jump + fall + bounce) — a visible drop-and-
+        settle instead of a physics glitch. Falls back to a plain ``Fall`` for packs
+        without the breed behavior."""
+        if not self.core:
+            return
+        wa = self._env.work_area
+        self.core.state.anchor.x = (wa.left + wa.right) / 2
+        self.core.state.anchor.y = self._env.floor.y
+        name = "PullUpShimeji" if "PullUpShimeji" in self.core.behavior_defs else "Fall"
+        self.core.force_behavior(name)
+        self.debug_log.emit(f"respawn: recentred on floor, forcing {name}")
 
     def set_tracked_window(self, rect: Optional[dict] = None):
         """Track the foreground window rect (logical px: left/top/right/bottom) so the
@@ -277,14 +321,81 @@ class MascotEngine(QObject):
                                          tracked_window=self._tracked_window)
             self.core.tick()
             # move the window to follow the core anchor (unless the user is dragging it
-            # or App is walking the pet off-screen during hide/show)
+            # or App is walking the pet off-screen during hide/show). The raw anchor is
+            # clamped to the work area so the whole sprite stays on-screen no matter what
+            # behavior target the engine computed (a Dash toward an off-screen cursor.x or
+            # a huge Math.random TargetX used to walk the pet off the monitor forever);
+            # then the interpolator smooths the move between engine ticks.
             if not self._dragging and not self._hide_walking:
                 st = self.core.state
-                x = int(st.anchor.x) - self._px // 2
-                y = int(st.anchor.y) - self._px
-                self.position_changed.emit(x, y)
+                x, y = self._clamp_pos(
+                    int(st.anchor.x) - self._px // 2,
+                    int(st.anchor.y) - self._px)
+                self._set_target(x, y)
+            else:
+                self._stop_interp()
+            self._maybe_debug(self.core.state)
         except Exception as exc:   # noqa: BLE001 - a bad tick must never kill the app
             logger.warning("mascot tick skipped: %s", exc)
+
+    # -- motion helpers --------------------------------------------------------
+    def _clamp_pos(self, x: int, y: int) -> tuple[int, int]:
+        """Keep the whole sprite inside the work area (fixes off-screen runaway)."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return x, y
+        geo = screen.availableGeometry()
+        px = self._px
+        return (max(geo.left(), min(x, geo.right() - px)),
+                max(geo.top(), min(y, geo.bottom() - px)))
+
+    def _set_target(self, x: int, y: int):
+        """Route an engine position to the window — directly or through the lerp timer."""
+        if not self._smooth:
+            self._pos_cur = (x, y)
+            self.position_changed.emit(x, y)
+            return
+        self._interp_from = self._pos_cur if self._pos_cur is not None else (x, y)
+        self._interp_to = (x, y)
+        self._interp_elapsed = 0
+        self._interp_total = max(1, self.tick_ms)
+        if not self._interp_timer.isActive():
+            self._interp_timer.start()
+
+    def _stop_interp(self):
+        self._interp_to = None
+        self._interp_timer.stop()
+
+    def _interp_step(self):
+        """Ease the window from the previous engine target to the current one."""
+        if self._interp_to is None:
+            self._interp_timer.stop()
+            return
+        self._interp_elapsed += self._interp_timer.interval()
+        t = min(1.0, self._interp_elapsed / self._interp_total)
+        t = t * t * (3.0 - 2.0 * t)                       # smoothstep ease
+        fx, fy = self._interp_from
+        tx, ty = self._interp_to
+        x = fx + (tx - fx) * t
+        y = fy + (ty - fy) * t
+        self._pos_cur = (int(x), int(y))
+        self.position_changed.emit(int(x), int(y))
+        if t >= 1.0:
+            self._interp_to = None
+            self._interp_timer.stop()
+
+    def _maybe_debug(self, st):
+        """Throttled (~1 Hz) telemetry line so Vault trails show where the pet is and
+        why (the reported 'logs are missing stuff'): anchor, work-area, behavior, frame."""
+        self._debug_counter += 1
+        if self._debug_counter % 25 != 0:
+            return
+        frame = getattr(getattr(st, "active_frame", None), "image", "") or ""
+        self.debug_log.emit(
+            f"anchor=({int(st.anchor.x)},{int(st.anchor.y)}) "
+            f"behavior={st.behavior_name or st.queued_behavior or ''} frame={frame} "
+            f"wa=({int(self._env.work_area.left)},{int(self._env.work_area.top)},"
+            f"{int(self._env.work_area.right)},{int(self._env.work_area.bottom)})")
 
     def _on_behavior(self, name: str):
         self.behavior_changed.emit(name)

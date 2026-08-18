@@ -207,3 +207,87 @@ def test_injected_throw_survives_tick_refresh(qapp):
     assert eng.core.env.cursor.dx == pytest.approx(500.0 / ticks)
     assert eng.core.env.cursor.dy == pytest.approx(-300.0 / ticks)
     assert eng._pending_throw is False           # consume-once flag cleared
+
+
+def test_mascot_engine_clamps_off_screen_targets(qapp):
+    """M9 feedback: a throw/run toward an off-screen target must never leave the monitor.
+    ``_clamp_pos`` keeps the whole sprite inside the work area (the old path called
+    ``window.move_to`` with no clamp, so Dash toward ``cursor.x``/a big ``Math.random``
+    TargetX walked the pet off-screen forever, and the ceiling clamp left it invisible)."""
+    from PySide6.QtWidgets import QApplication
+    from vaultsprite.mascot_engine_widget import MascotEngine
+    from tests.conftest import FakeConfig
+
+    eng = MascotEngine(FakeConfig({}))
+    geo = QApplication.primaryScreen().availableGeometry()
+    px = eng._px
+
+    # far past the right edge / below the bottom → clamped to the visible bounds
+    x, y = eng._clamp_pos(geo.right() + 9999, geo.bottom() + 9999)
+    assert x <= geo.right() - px
+    assert y <= geo.bottom() - px
+    # far past the left / top (the "climbed up and vanished at the ceiling" case) →
+    # clamped so the sprite head stays at/under the top edge instead of above it
+    x, y = eng._clamp_pos(geo.left() - 9999, geo.top() - 9999)
+    assert x >= geo.left()
+    assert y >= geo.top()
+
+
+def test_mascot_interpolation_smooths_window_moves(qapp):
+    """M9 feedback: throws read as 'frame-by-frame' judder because the window moved once
+    per 25 Hz engine tick in large steps. The interpolation layer subdivides each engine
+    target into small eased moves so successive positions never jump the full distance."""
+    from vaultsprite.mascot_engine_widget import MascotEngine
+    from tests.conftest import FakeConfig
+
+    eng = MascotEngine(FakeConfig({}))
+    eng._smooth = True
+    eng._pos_cur = (0, 0)
+    moves: list[tuple[int, int]] = []
+    eng.position_changed.connect(lambda x, y: moves.append((x, y)))
+
+    eng._set_target(400, 300)
+    guard = 0
+    while eng._interp_timer.isActive() and guard < 1000:
+        eng._interp_step()
+        guard += 1
+
+    assert moves and moves[-1] == (400, 300)          # arrives at the target
+    assert len(moves) >= 3                            # subdivided into multiple steps
+    max_delta = max(abs(moves[i][0] - moves[i - 1][0]) + abs(moves[i][1] - moves[i - 1][1])
+                    for i in range(1, len(moves)))
+    assert max_delta < 400                            # no single full-distance teleport
+
+
+def test_mascot_respawn_recentres_and_forces_breed_gag(qapp):
+    """M9 feedback: changing the scale mid-animation left the pet floating/jumping. respawn()
+    recentres the anchor on the floor and replays the breed 'spawned a new version' flourish
+    (PullUpShimeji gag + fall) so the resized pet visibly settles instead of glitching."""
+    from vaultsprite.mascot_engine_widget import MascotEngine
+    from tests.conftest import FakeConfig
+
+    eng = MascotEngine(FakeConfig({}))
+    eng.core.state.anchor.x = 10.0
+    eng.core.state.anchor.y = 10.0
+    eng.respawn()
+
+    wa = eng._env.work_area
+    assert eng.core.state.anchor.x == pytest.approx((wa.left + wa.right) / 2)
+    assert eng.core.state.anchor.y == pytest.approx(eng._env.floor.y)
+    assert eng.core.state.queued_behavior == "PullUpShimeji"
+
+
+def test_scale_change_triggers_respawn_unless_hidden(qapp, tmp_path, monkeypatch):
+    """The tray scale control routes through _on_scale_changed → MascotEngine.respawn()
+    so a resize always re-settles the pet; while hidden the respawn is skipped."""
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path, mascot=True))
+    calls = []
+    monkeypatch.setattr(app.mascot, "respawn", lambda: calls.append(1))
+    app._on_scale_changed(1.0)
+    assert calls == [1]
+    app._hidden = True
+    app._on_scale_changed(1.5)
+    assert calls == [1]                     # hidden → no respawn
+    app.shutdown()

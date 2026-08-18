@@ -10,7 +10,10 @@ app:
 window:
   width: 89             # overlay window size in logical px (~0.7× the original 128; sprite scales to this)
   height: 89
-  fps: 30               # animation tick rate (frame-slicer timer)
+  # NOTE: window.fps only affects the legacy (non-mascot) GIF SpritePlayer. When
+  # mascot.enabled is true (the default), the Shimeji engine clock is mascot.tick_ms
+  # instead — this key is informational/legacy and read by no code today.
+  fps: 30               # legacy animation tick rate (frame-slicer timer)
   drag_threshold_px: 5      # press travel before a click becomes a drag (Manhattan distance)
   click_timeout_ms: 200     # no-move window that confirms a single click
   flick_speed_threshold: 80.0   # px/s at release required to inject an impulse
@@ -91,4 +94,5 @@ mascot:                      # M9 behavior engine — plays assets/steve_shimeji
   behaviors_xml: assets/steve_shimeji/conf/behaviors.xml
   tick_ms: 40                # Shimeji action clock (~25 ticks/s, matches their Duration units)
   time_scale: 1.0            # multiplies pose durations (Shijima's userScale plumbing): <1 = livelier pet
+  smooth_motion: true        # interpolate the window between engine ticks so throws look smooth on high-refresh monitors
   excluded_behaviors: [SplitIntoTwo, PullUpShimeji]   # solo-pet: breeding/divide stay off (frames 37-46 kept for later)
