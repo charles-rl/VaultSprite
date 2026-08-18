@@ -716,11 +716,20 @@ class _DraggableAction(AnimationAction):   # Dragged / Regist pose sets (in-plac
         # Pendulum (C++ Dragged): footDx = (footDx + (cursorX - footX)*0.1)*0.8 — a damped
         # oscillator that keeps FootX swinging back and forth around the cursor even after it
         # stops moving. The Pinched lean conditions (FootX < cursor.x - N) then alternate, so
-        # the pet visibly sways like a pendulum instead of holding one lean pose.
+        # the pet visibly sways like a pendulum instead of holding one lean pose. When the
+        # cursor comes to rest within a small dead-zone we LOCK FootX onto it (foot_dx = 0) so
+        # the sway actually settles instead of re-exciting on cursor jitter forever.
         st = self.st
-        base = st.foot_x if st.foot_x is not None else self.env.cursor.x
-        st.foot_dx = (st.foot_dx + (self.env.cursor.x - base) * 0.1) * 0.8
-        st.foot_x = base + st.foot_dx
+        cur_x = self.env.cursor.x
+        if st.foot_x is None:
+            st.foot_x = cur_x
+        if abs(cur_x - st.foot_x) < 2.0:
+            st.foot_x = cur_x
+            st.foot_dx = 0.0
+        else:
+            base = st.foot_x
+            st.foot_dx = (st.foot_dx + (cur_x - base) * 0.1) * 0.8
+            st.foot_x = base + st.foot_dx
         # `_current_anim()` picks the AnimList whose #{Condition} holds (C++ Pinched picks
         # the pose by FootX-vs-cursor distance); play its pose in place — x follows the cursor (UI).
         anim = self._current_anim()

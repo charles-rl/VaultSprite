@@ -107,6 +107,9 @@ class MascotEngine(QObject):
         self._interp_timer.setInterval(max(5, self.tick_ms // 4))
         self._interp_timer.timeout.connect(self._interp_step)
         self._debug_counter = 0
+        # the grip surface for the current tick: True = anchor is on the ceiling, so the
+        # sprite is rendered upside-down hanging below the feet (see _clamp_pos/_on_frame).
+        self._on_ceiling = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(self.tick_ms)
@@ -166,6 +169,14 @@ class MascotEngine(QObject):
     def set_dragging(self, dragging: bool):
         self._dragging = dragging
         if dragging:
+            self._stop_interp()
+        if not dragging:
+            # Release: the window is already at the drop point (the overlay followed the
+            # mouse), but _pos_cur still holds the pre-drag position. If we kept it, the
+            # next _set_target would lerp the window back to the grab point then forward
+            # to the throw target — the visible snap-back. Resetting it makes the next
+            # engine target the interpolation origin, so the throw launches in place.
+            self._pos_cur = None
             self._stop_interp()
         if self.core:
             self.core.state.dragging = dragging
@@ -319,18 +330,19 @@ class MascotEngine(QObject):
             self._cursor = (cx, cy)
             self.core.update_environment(cursor_pos=(cx, cy, dx, dy),
                                          tracked_window=self._tracked_window)
+            # grip surface for THIS tick's rendering (upside-down ceiling flip): read the
+            # anchor before the tick so _on_frame flips the frame as it is drawn.
+            self._on_ceiling = self._anchor_on_ceiling()
             self.core.tick()
             # move the window to follow the core anchor (unless the user is dragging it
-            # or App is walking the pet off-screen during hide/show). The raw anchor is
-            # clamped to the work area so the whole sprite stays on-screen no matter what
-            # behavior target the engine computed (a Dash toward an off-screen cursor.x or
-            # a huge Math.random TargetX used to walk the pet off the monitor forever);
-            # then the interpolator smooths the move between engine ticks.
+            # or App is walking the pet off-screen during hide/show). The anchor is clamped
+            # to the work-area borders so the pet actually grips the ceiling and side walls
+            # (no on-screen margin) while never running off-screen — a Dash toward an
+            # off-screen cursor.x or a huge Math.random TargetX still can't escape; the
+            # interpolator then smooths the move between engine ticks.
             if not self._dragging and not self._hide_walking:
                 st = self.core.state
-                x, y = self._clamp_pos(
-                    int(st.anchor.x) - self._px // 2,
-                    int(st.anchor.y) - self._px)
+                x, y = self._clamp_pos(int(st.anchor.x), int(st.anchor.y))
                 self._set_target(x, y)
             else:
                 self._stop_interp()
@@ -339,15 +351,31 @@ class MascotEngine(QObject):
             logger.warning("mascot tick skipped: %s", exc)
 
     # -- motion helpers --------------------------------------------------------
-    def _clamp_pos(self, x: int, y: int) -> tuple[int, int]:
-        """Keep the whole sprite inside the work area (fixes off-screen runaway)."""
+    def _anchor_on_ceiling(self) -> bool:
+        """True when the core anchor (feet) is on the ceiling, so the sprite hangs
+        upside-down below it instead of standing above it."""
+        if self.core is None:
+            return False
         screen = QApplication.primaryScreen()
         if screen is None:
-            return x, y
-        geo = screen.availableGeometry()
+            return False
+        return self.core.state.anchor.y <= screen.availableGeometry().top() + 1
+
+    def _clamp_pos(self, ax: int, ay: int) -> tuple[int, int]:
+        """Clamp the ANCHOR (feet) to the work-area borders and derive the window's
+        top-left. Keeping the anchor on the borders lets the pet grip the ceiling and
+        side walls (no visible margin), while the border clamp still stops off-screen
+        runaway — a Dash/Throw target outside the work area pins the feet on the edge
+        instead of pushing the whole window off the monitor. Returns (x, y) window pos."""
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            ax = max(geo.left(), min(ax, geo.right()))
+            ay = max(geo.top(), min(ay, geo.bottom()))
         px = self._px
-        return (max(geo.left(), min(x, geo.right() - px)),
-                max(geo.top(), min(y, geo.bottom() - px)))
+        if self._on_ceiling:
+            return ax - px // 2, ay          # body hangs BELOW the feet (upside down)
+        return ax - px // 2, ay - px         # body rises ABOVE the feet
 
     def _set_target(self, x: int, y: int):
         """Route an engine position to the window — directly or through the lerp timer."""
@@ -410,6 +438,11 @@ class MascotEngine(QObject):
         # and vice-versa, which made the walk look flipped.
         if self.core.state.looking_right:
             pm = pm.transformed(QTransform().scale(-1, 1))
+        # Gripping the ceiling: the anchor (feet) is at the top and the body hangs below, so
+        # flip vertically too. The anchor is the bottom-center of the standing image; after a
+        # vertical flip it's the top-center, which is where the feet grip the ceiling.
+        if getattr(self, "_on_ceiling", False):
+            pm = pm.transformed(QTransform().scale(1, -1))
         pm = pm.scaled(self._px, self._px, Qt.AspectRatioMode.KeepAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)
         self._rendered_frame = True

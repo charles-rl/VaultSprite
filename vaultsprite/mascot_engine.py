@@ -212,7 +212,11 @@ class MascotCore:
             elif action_type.lower().startswith("breed"):
                 # visual-only flourish: play the Breed animation (frames 38-46) in place, but
                 # never spawn — env.allows_breeding is False for the solo pet. Frames stay used.
-                action_type = "Stay"
+                # NOTE: must be "Animate" (play once then advance), NOT "Stay" — a Stay loops
+                # its poses forever, so the PullUpShimeji/SplitIntoTwo gag would never advance
+                # and the pet would sit in the flourish indefinitely (reported scale-change
+                # loop). Animate plays the breed frames once and moves on.
+                action_type = "Animate"
             else:
                 return _NoOpAction(attrs, self, name)
 

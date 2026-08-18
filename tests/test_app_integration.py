@@ -211,9 +211,9 @@ def test_injected_throw_survives_tick_refresh(qapp):
 
 def test_mascot_engine_clamps_off_screen_targets(qapp):
     """M9 feedback: a throw/run toward an off-screen target must never leave the monitor.
-    ``_clamp_pos`` keeps the whole sprite inside the work area (the old path called
-    ``window.move_to`` with no clamp, so Dash toward ``cursor.x``/a big ``Math.random``
-    TargetX walked the pet off-screen forever, and the ceiling clamp left it invisible)."""
+    ``_clamp_pos`` now pins the ANCHOR (feet) to the work-area borders so the pet reaches the
+    ceiling and side walls to grip them (no on-screen margin), while a Dash toward
+    ``cursor.x``/a big ``Math.random`` TargetX can no longer walk the whole pet off-screen."""
     from PySide6.QtWidgets import QApplication
     from vaultsprite.mascot_engine_widget import MascotEngine
     from tests.conftest import FakeConfig
@@ -222,15 +222,23 @@ def test_mascot_engine_clamps_off_screen_targets(qapp):
     geo = QApplication.primaryScreen().availableGeometry()
     px = eng._px
 
-    # far past the right edge / below the bottom → clamped to the visible bounds
+    # far past the right / bottom → feet clamp onto the right wall / floor (no runaway)
     x, y = eng._clamp_pos(geo.right() + 9999, geo.bottom() + 9999)
-    assert x <= geo.right() - px
-    assert y <= geo.bottom() - px
-    # far past the left / top (the "climbed up and vanished at the ceiling" case) →
-    # clamped so the sprite head stays at/under the top edge instead of above it
+    assert x + px // 2 == geo.right()          # feet pinned to the right wall
+    assert y + px == geo.bottom()              # feet pinned to the floor
+
+    # far past the left / top while STANDING → feet clamp onto the borders; the sprite may
+    # overhang the side by half its size so it can grip, but never leaves the area entirely
     x, y = eng._clamp_pos(geo.left() - 9999, geo.top() - 9999)
-    assert x >= geo.left()
-    assert y >= geo.top()
+    assert x + px // 2 == geo.left()           # feet pinned to the left wall
+    assert y + px == geo.top()                 # standing just below the ceiling
+
+    # gripping the ceiling: the body hangs BELOW the feet (upside down), so the window starts
+    # at the anchor — fully visible, not "vanished above the ceiling"
+    eng._on_ceiling = True
+    x, y = eng._clamp_pos(geo.right() + 9999, geo.top() - 9999)
+    assert x + px // 2 == geo.right()
+    assert y == geo.top()                      # window top == anchor → body visible below
 
 
 def test_mascot_interpolation_smooths_window_moves(qapp):
@@ -285,7 +293,7 @@ def test_scale_change_triggers_respawn_unless_hidden(qapp, tmp_path, monkeypatch
     app = App(_test_config(tmp_path, mascot=True))
     calls = []
     monkeypatch.setattr(app.mascot, "respawn", lambda: calls.append(1))
-    app._on_scale_changed(1.0)
+    app._on_scale_changed(1.2)              # a size change re-settles the pet
     assert calls == [1]
     app._hidden = True
     app._on_scale_changed(1.5)

@@ -678,9 +678,9 @@
 			<Animation>
 				<Pose Image="/shime1.png" ImageAnchor="64,128" Velocity="0,0" Duration="16" />
 				<Pose Image="/shime38.png" ImageAnchor="96,128" Velocity="0,0" Duration="4" />
-				<Pose Image="/shime39.png" ImageAnchor="96,128" Velocity="0,0" Duration="40" />
-				<Pose Image="/shime40.png" ImageAnchor="96,128" Velocity="0,0" Duration="40" />
-				<Pose Image="/shime41.png" ImageAnchor="96,128" Velocity="0,0" Duration="40" />
+				<Pose Image="/shime39.png" ImageAnchor="96,128" Velocity="0,0" Duration="6" />
+				<Pose Image="/shime40.png" ImageAnchor="96,128" Velocity="0,0" Duration="6" />
+				<Pose Image="/shime41.png" ImageAnchor="96,128" Velocity="0,0" Duration="6" />
 			</Animation>
 		</Action>
 		<Action Name="PullUpShimeji2" Type="Animate">
@@ -709,7 +709,7 @@
 				<Pose Image="/shime43.png" ImageAnchor="64,128" Velocity="0,0" Duration="2" />
 				<Pose Image="/shime44.png" ImageAnchor="64,128" Velocity="0,0" Duration="2" />
 				<Pose Image="/shime45.png" ImageAnchor="64,128" Velocity="0,0" Duration="5" />
-				<Pose Image="/shime46.png" ImageAnchor="64,128" Velocity="0,0" Duration="20" />
+				<Pose Image="/shime46.png" ImageAnchor="64,128" Velocity="0,0" Duration="6" />
 			</Animation>
 		</Action>
 		<Action Name="SplitIntoTwo" Type="Sequence">
