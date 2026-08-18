@@ -79,6 +79,16 @@ class MascotEngine(QObject):
         self._dragging = False
         self._hide_walking = False
         self._rendered_frame = False
+        # tracked foreground window rect (logical px) or None → the engine's "no window"
+        # invisible-sentinel. Fed to core.update_environment every tick (D10). The caller
+        # must divide any Win32 physical px by devicePixelRatio() at the bridge.
+        self._tracked_window: Optional[dict] = None
+        # consume-once throw velocity: inject_throw() feeds the launch tick, and _tick()
+        # must NOT overwrite it with the live cursor delta before the queued Thrown reads
+        # ${cursor.dx}/${cursor.dy} (review finding A1).
+        self._pending_throw = False
+        self._pending_dx = 0.0
+        self._pending_dy = 0.0
 
         self._timer = QTimer(self)
         self._timer.setInterval(self.tick_ms)
@@ -210,12 +220,18 @@ class MascotEngine(QObject):
         if not self.core:
             return
         ticks = 1000.0 / max(1, self.tick_ms)
-        self.core.env.cursor.dx = vx_px_s / ticks
-        self.core.env.cursor.dy = vy_px_s / ticks
+        # Stage the release velocity for the single tick that consumes the queued
+        # Thrown. Writing cursor.dx/dy directly here is not enough: _tick() refreshes
+        # them from the live QCursor delta every tick (see _tick below).
+        self._pending_dx = vx_px_s / ticks
+        self._pending_dy = vy_px_s / ticks
+        self._pending_throw = True
 
     def set_tracked_window(self, rect: Optional[dict] = None):
-        if self.core:
-            self.core.update_environment(tracked_window=rect)
+        """Track the foreground window rect (logical px: left/top/right/bottom) so the
+        engine can land on / interact with windows (activeIE). Pass None for "no window".
+        The caller divides Win32 physical px by devicePixelRatio() at the bridge."""
+        self._tracked_window = rect
 
     # -- internals --------------------------------------------------------------
     @staticmethod
@@ -248,10 +264,17 @@ class MascotEngine(QObject):
             self._update_env_geometry()
             c = QCursor.pos()          # may be a null QPoint offscreen; guard defensively
             cx, cy = (c.x(), c.y()) if c is not None else (0, 0)
-            px, py = self._cursor if self._cursor is not None else (cx, cy)
-            dx, dy = cx - px, cy - py
+            if self._pending_throw:
+                # the tick that launches the queued Thrown must see the injected flick
+                # velocity, not the (tiny) live cursor delta of this same tick.
+                dx, dy = self._pending_dx, self._pending_dy
+                self._pending_throw = False
+            else:
+                px, py = self._cursor if self._cursor is not None else (cx, cy)
+                dx, dy = cx - px, cy - py
             self._cursor = (cx, cy)
-            self.core.update_environment(cursor_pos=(cx, cy, dx, dy))
+            self.core.update_environment(cursor_pos=(cx, cy, dx, dy),
+                                         tracked_window=self._tracked_window)
             self.core.tick()
             # move the window to follow the core anchor (unless the user is dragging it
             # or App is walking the pet off-screen during hide/show)

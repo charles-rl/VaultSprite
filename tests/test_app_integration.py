@@ -189,3 +189,21 @@ def test_nearest_edge_selection(qapp, tmp_path):
     tx, _ = app._hide_edge_target()
     assert tx == geo.right()
     app.shutdown()
+
+
+def test_injected_throw_survives_tick_refresh(qapp):
+    """A1 regression: the flick velocity injected by inject_throw() must survive the next
+    engine tick, whose per-tick cursor refresh used to overwrite cursor.dx/dy with the
+    (tiny) live delta before the queued Thrown read ${cursor.dx} — so every flick
+    degraded to a near-zero drop."""
+    from vaultsprite.mascot_engine_widget import MascotEngine
+    from tests.conftest import FakeConfig
+
+    eng = MascotEngine(FakeConfig({}))
+    assert eng.core is not None
+    eng.inject_throw(500.0, -300.0)
+    ticks = 1000.0 / eng.tick_ms
+    eng._tick()                                  # the tick that consumes the queued Thrown
+    assert eng.core.env.cursor.dx == pytest.approx(500.0 / ticks)
+    assert eng.core.env.cursor.dy == pytest.approx(-300.0 / ticks)
+    assert eng._pending_throw is False           # consume-once flag cleared

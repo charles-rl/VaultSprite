@@ -3,9 +3,18 @@
 Pure-Python port of the Shimeji-ee runtime (pattern source: ``DalekCraft2/Shimeji-Desktop``,
 see ``docs/09_mascot_engine/README.md``): parses ``actions.xml`` + ``behaviors.xml``, runs the
 weighted behavior roulette with per-tick pose animation over raw PNG frames, and evaluates
-`${...}`(once)/`#{...}`(per-tick) conditions through the safe evaluator in
+``${...}``(once)/`#{...}`(per-tick) conditions through the safe evaluator in
 :mod:`vaultsprite.mascot_environment`. No Qt import — unit-tested by calling ``core.tick()``
 directly (the same style as terrain/stat tests).
+
+This module is the **facade + orchestrator** of the M9 split: it holds :class:`MascotCore`
+(the parser, behavior roulette, tick loop and 4-level recovery ladder) and re-exports the
+leaf-module types so existing imports keep working. The rest of the split lives in:
+
+- :mod:`vaultsprite.mascot_xml`    — namespace-agnostic XML helpers
+- :mod:`vaultsprite.mascot_data`   — pose/animation + behavior-pool data types
+- :mod:`vaultsprite.mascot_vars`   — ``ActionVars`` (``${once}`` / ``#{per-tick}`` store)
+- :mod:`vaultsprite.mascot_actions` — the action runners (Stay/Move/Fall/Jump/Sequence/…)
 
 Ownership model (documented for AGENTS.md): external forces originate from App and are forced
 onto behaviors — drag start → ``Dragged``, flick/release → ``Thrown``, stretch nudge/vision
@@ -25,823 +34,25 @@ Fidelity notes / deliberate divergences:
 from __future__ import annotations
 
 import logging
+import math
 import random
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from .mascot_environment import (BORDER_TOL, DArea, DVec2, JSMascot, MascotEnvironment,
-                                 Vec2, ExpressionCompiler, parse_error)
+from .mascot_actions import (Action, ActionCtx, AnimationAction, AnimateAction,
+                             FallAction, InPlaceAction, InstantAction, JumpAction,
+                             MalformedAction, MoveAction, ReferenceAction, SelectAction,
+                             SequenceAction, StayAction, _DraggableAction, _NoOpAction,
+                             _NoOpInline, core_view, is_true_js, strip_js_expr)
+from .mascot_data import (AnimList, BehaviorDef, BehaviorNode, MascotState, Pose,
+                          _BehaviorList, _FlatSources, _GroupSources, _NamedSource,
+                          _PoolEntry, _PoolSource, _PoolSourcesOf)
+from .mascot_environment import (BORDER_TOL, DArea, DVec2, ExpressionCompiler, JSMascot,
+                                 MascotEnvironment, Vec2, is_undefined, parse_error)
+from .mascot_vars import ActionVars, _DynOnce, _UNDEFINED, _UNDEFINED_TYPE2, _coerce_literal
+from .mascot_xml import _attr_of, _attrs, _iter_elements, _load, local_name, ns_el
 
 logger = logging.getLogger(__name__)
-
-
-# --------------------------------------------------------------------------- data types --
-@dataclass
-class Pose:
-    image: str                       # e.g. "shime1.png" (relative to the mascot img dir)
-    anchor: Vec2                     # image-space feet point ("ImageAnchor")
-    velocity: Vec2                   # world px per tick; vx mirrored by look direction
-    duration: int                    # ticks
-
-
-class AnimList:                      # one <Animation> block (a looping pose sequence)
-    __slots__ = ("poses", "condition_js", "total_duration")
-
-    def __init__(self, poses: list[Pose], condition_js: str = "true"):
-        self.poses = poses
-        self.condition_js = condition_js
-        self.total_duration = max(1, sum(p.duration for p in poses))
-
-    def get_pose(self, t: int) -> Pose:          # loops; C++ `time %= duration`
-        if not self.poses:
-            raise RuntimeError("animation without poses")
-        t %= self.total_duration
-        for pose in self.poses:
-            t -= pose.duration
-            if t < 0:
-                return pose
-        return self.poses[-1]
-
-    @property
-    def duration(self) -> int:
-        return self.total_duration
-
-
-@dataclass
-class MascotState:                   # per-mascot live state (subset of Shimeji-ee `Mascot`)
-    anchor: Vec2 = field(default_factory=Vec2)
-    looking_right: bool = True
-    dragging: bool = False
-    time: int = 0                    # tick counter, incremented in pre_tick
-    active_frame: Optional[Pose] = None
-    behavior_name: str = ""
-    queued_behavior: str = ""
-    was_on_ie: bool = False
-    dead: bool = False
-    foot_x: Optional[float] = None    # pendulum oscillator (C++ Dragged) — None ⇒ anchor.x
-    foot_dx: float = 0.0
-
-
-class _BehaviorList:                 # children + condition groups (mirrors C++ `list`)
-    __slots__ = ("children", "sublists")
-
-    def __init__(self):
-        self.children: list["Behavior"] = []
-        self.sublists: list[tuple[str, "BehaviorNode"]] = []   # (cond_js, sublist)
-
-
-@dataclass
-class BehaviorNode:                  # one candidate behavior in a pool (inline <Action> or ref)
-    name: str                        # its own name (for <NextBehavior> refs & logging)
-    action: Any                      # an Action instance (parsed once, re-init per use)
-    frequency: int = 100
-    hidden: bool = False
-
-
-@dataclass
-class _PoolEntry:                    # a flattened, condition-checked candidate
-    behavior_node: BehaviorNode
-    add_next: bool                   # "Add" attr of the <Behavior> element that owns it
-    next_js_children: list[tuple[str, "_PoolSource"]]  # (cond_js or "", source) next pool
-    next_is_full_replace_on_pick: bool = False
-
-
-# --------------------------------------------------------------------------- variables --
-class ActionVars:
-    """Attribute store for one action run.
-
-    ``${...}`` → evaluated **once** at init (value cached); `#{...}` → re-evaluated every
-    access; plain literals parsed to number/bool where possible."""
-
-    def __init__(self, attrs: dict[str, str], view_factory: Callable[[], JSMascot], rng):
-        self._view = view_factory
-        self._rng = rng
-        self._static: dict[str, Any] = {}
-        self._dynamic: dict[str, ExpressionCompiler] = {}
-        for key, raw in attrs.items():
-            v = (raw or "").strip()
-            if v.startswith("${") and v.endswith("}"):
-                comp = ExpressionCompiler(v[2:-1])     # raises parse_error → caught by parser
-                self._static[key] = _DynOnce(comp, self._view, rng)
-            elif v.startswith("#{") and v.endswith("}"):
-                self._dynamic[key] = ExpressionCompiler(v[2:-1])
-            else:
-                self._static[key] = _coerce_literal(v)
-
-    def has(self, key: str) -> bool:
-        return key in self._static or key in self._dynamic
-
-    def get_num(self, key: str, fallback: float = 0.0) -> float:
-        v = self.resolve(key)
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return float(v)
-        try:
-            s = str(v).strip()
-            if s == "":
-                return fallback
-            return float(s)
-        except ValueError:
-            return fallback
-
-    def get_bool(self, key: str, fallback: bool = True) -> bool:
-        v = self.resolve(key)
-        if v is _UNDEFINED:
-            return fallback
-        if isinstance(v, bool):
-            return v
-        try:
-            s = str(v).strip().lower()
-            if s in ("", "false", "0"):
-                return False
-            if s in ("true", "1"):
-                return True
-            float(s)      # a plain number → JS-truthy (nonzero)
-            return v not in (None, 0, 0.0)
-        except ValueError:
-            return fallback
-
-    def get_str(self, key: str, fallback: str = "") -> str:
-        v = self.resolve(key)
-        return fallback if v is _UNDEFINED else str(v)
-
-    def resolve(self, key: str):
-        if key in self._dynamic:
-            try:
-                val = self._dynamic[key].eval_value(self._view(), self._rng)
-            except Exception:
-                return _UNDEFINED
-            return val
-        v = self._static.get(key, _UNDEFINED)
-        return v.value() if isinstance(v, _DynOnce) else v
-
-
-class _UNDEFINED_TYPE2:
-    def __bool__(self): return False
-
-    def __repr__(self): return "undefined"
-
-
-_UNDEFINED = _UNDEFINED_TYPE2()
-
-
-class _DynOnce:                      # `${...}` placeholder resolved at first access / init
-    def __init__(self, comp: ExpressionCompiler, view_factory, rng):
-        self.comp, self._vf, self.rng = comp, view_factory, rng
-        self._value: Any = None
-        self._done = False
-
-    def value(self) -> Any:
-        if not self._done:
-            try:
-                self._value = self.comp.eval_value(self._vf(), self.rng)
-            except Exception as exc:               # noqa: BLE001 - malformed expr → undefined
-                logger.warning("action expression failed once-at-init: %s", exc)
-                self._value = _UNDEFINED
-            self._done = True
-        return self._value
-
-
-def _coerce_literal(v: str) -> Any:
-    if v == "true":
-        return True
-    if v == "false":
-        return False
-    try:
-        if "." in v:
-            return float(v)
-        return int(v)
-    except ValueError:
-        return v
-
-
-# --------------------------------------------------------------------------- actions ----
-class ActionCtx:                     # mirrors Shimeji-ee `Mascot` tick (script + attr overlay)
-    def __init__(self, core: "MascotCore", extra_attr: Optional[dict[str, str]] = None):
-        self.core = core
-        self.extra_attr = dict(extra_attr or {})
-
-
-class Action:                        # base runner (C++ `action::base`)
-    #: sub-action list for sequence/select; override in subclasses with children
-    children: list["Action"]
-
-    def __init__(self, attrs: dict[str, str], core: "MascotCore"):
-        self.init_attrs = dict(attrs)
-        self.core = core
-        self.active = False
-        self.start_time = 0
-
-    # -- lifecycle -----------------------------------------------------------
-    def init(self, ctx: ActionCtx):
-        if self.active:
-            raise RuntimeError("init() called twice")
-        st = self.core.state
-        self.active = True
-        self.real_start = st.time
-        merged = dict(self.init_attrs)
-        for k, v in (ctx.extra_attr or {}).items():   # reference overlays win (C++ overlay)
-            merged[k] = v
-        try:
-            self.vars = ActionVars(merged, lambda: core_view(self.core), self.core.rng)
-        except parse_error as exc:
-            self.active = False
-            raise MalformedAction(self.name(), f"bad expression: {exc}") from exc
-
-    def finalize(self):
-        if not self.active:
-            return
-        st = self.core.state
-        if st.queued_behavior and _UNDEFINED is None:   # keep queued behavior across actions
-            pass
-        self.active = False
-
-    @property
-    def real_elapsed(self) -> int:
-        return self.core.state.time - getattr(self, "real_start", 0)
-
-    def name(self) -> str:
-        return self.init_attrs.get("Name") or self.__class__.__name__.lower()
-
-    # -- per tick --------------------------------------------------------------
-    def condition_ok(self) -> bool:
-        """`#{...}` Condition attr re-evaluated every tick (C++ `vars.tick()`)."""
-        if not self.vars.has("Condition"):
-            return True
-        try:
-            v = self.vars.resolve("Condition")
-        except Exception:
-            return False
-        return bool(v)
-
-    def duration_ok(self) -> bool:
-        """Action ends after its Duration attr (ticks). Missing → runs until animation logic says stop."""
-        if not self.vars.has("Duration"):
-            return True
-        return self.real_elapsed < int(self.vars.get_num("Duration", 10**9))
-
-    def tick_ok(self) -> bool:      # shared gate before subclass motion; False ⇒ advance
-        st = self.core.state
-        if st.queued_behavior:
-            return False                            # pre-empt immediately (C++ behavior queue)
-        if not self.condition_ok():
-            return False
-        if not self.duration_ok():
-            return False
-        return True
-
-    def subtick(self, idx: int = 0) -> bool:
-        """Return False when this action has finished (sequence advances / manager repicks)."""
-        if idx != 0:      # only tick on the real tick; subticks are a future seam
-            return self.active
-        if not self.tick_ok():
-            return False
-        return self.step()
-
-    def step(self) -> bool:
-        """Subclass motion for one tick. Default (animation actions): advance the pose."""
-        raise NotImplementedError
-
-    # -- helpers -----------------------------------------------------------------
-    @property
-    def st(self) -> MascotState:
-        return self.core.state
-
-    @property
-    def env(self) -> MascotEnvironment:
-        return self.core.env
-
-
-class MalformedAction(RuntimeError):
-    """An action/behavior failed to init (bad XML/expression). The manager's recovery
-    ladder then falls back — a single bad behavior can never kill the pet."""
-
-    def __init__(self, name: str, why: str):
-        super().__init__(f"action {name!r}: {why}")
-        self.name = name
-
-
-class AnimationAction(Action):      # Stay / Move-ish poses with <Animation> blocks + BorderType
-    def __init__(self, attrs, core, anim_lists: list[AnimList]):
-        super().__init__(attrs, core)
-        self.anims = anim_list if (anim_list := anim_lists) else []
-
-    # pose selection: first AnimList whose Condition holds (C++ `get_animation`).
-    # A literal "true"/"" branch matches unconditionally; any real `#{...}`/`${...}`
-    # expression is evaluated per tick. (The previous `if not is_true_js(cond): continue`
-    # was inverted — it skipped every conditional branch, so Dragged/Pinched's lean poses,
-    # SitAndLookAtMouse, ClimbWall direction, etc. never animated differently.)
-    def _current_anim(self) -> Optional[AnimList]:
-        for anim in self.anims:
-            cond = (anim.condition_js or "true").strip()
-            if is_true_js(cond):
-                return anim                      # unconditional branch always matches
-            try:
-                v = ExpressionCompiler(strip_js_expr(cond)).eval_value(
-                    core_view(self.core), self.core.rng)
-            except Exception:
-                v = False
-            if bool(v):
-                return anim
-        return None
-
-    def _border_type_ok(self) -> tuple[bool, Optional[str]]:
-        """Check BorderType Floor/Wall/Ceiling; returns (still_on_border, queued_behavior)."""
-        st, env = self.st, self.env
-        bt = str(self.vars.get_str("BorderType", "") or "").lower() if self.vars else ""
-        a = st.anchor
-        if bt == "floor":
-            on = env.floor.is_on(a) or env.active_ie.top_border().is_on(a)
-        elif bt in ("wall",):
-            look_right = (env.work_area.right_border().is_on(a) or env.active_ie.left_border().is_on(a))
-            on = (look_right or env.work_area.left_border().is_on(a)
-                  or env.active_ie.right_border().is_on(a))
-            if on:
-                st.looking_right = bool(look_right)
-        elif bt == "ceiling":
-            on = env.work_area.top_border().is_on(a) or env.active_ie.bottom_border().is_on(a)
-        else:
-            on = True
-        if not on:
-            # slipped off its surface; fall unless we're touching any surface still (C++ queues Fall)
-            queued = "Fall" if not (env.work_area.is_on(a) or env.active_ie.is_on(a)) else None
-            return False, queued
-        return True, None
-
-    def _dragging_ok(self) -> bool:
-        """If the user pressed us mid-action → hand control to the Dragged behavior."""
-        st = self.st
-        if st.dragging and self.vars is not None and self.vars.get_bool("Draggable", True):
-            st.queued_behavior = "Dragged"      # C++ handle_dragging()
-            return False
-        return True
-
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        ok, queued = self._border_type_ok()
-        if not ok:
-            if queued:
-                self.st.queued_behavior = queued
-            return False
-        if not self._dragging_ok():
-            return False
-        anim = self._current_anim()
-        if anim is None or not anim.poses:
-            logger.debug("no matching animation branch for %s", self.name())
-            return False                          # advance (sequence end / next behavior)
-        pose = anim.get_pose(self.st.time - getattr(self, "_anim_t0", 0)) \
-            if hasattr(self, "_anim_t0") else anim.poses[0]
-        if not hasattr(self, "_anim_t0"):
-            self._anim_t0 = self.st.time
-        v = pose.velocity
-        st, lr = self.st, self.st.looking_right
-        st.anchor.x += (-1 if lr else 1) * v.x    # dx() mirror: left-facing flips horizontal
-        st.anchor.y += v.y
-        self.core.set_active_frame(pose)
-        return True
-
-
-class StayAction(AnimationAction):   # loops its poses until external end
-    pass
-
-
-class AnimateAction(AnimationAction):
-    """C++ ``Animate``: play the effective animation ONCE, then end.
-
-    The reference ``Animate.hasNext()`` is ``getTime() < getAnimation().getDuration()``,
-    so an ``Animate`` action finishes after a single cycle. Our generic ``AnimationAction``
-    looped forever instead — that's the reported "spams the shime18 water-bucket landing
-    animation and is stuck in an infinite loop": ``Bouncing`` is ``Type="Animate"`` and,
-    with no ``Duration``, never advanced to ``Stand``."""
-
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        ok, queued = self._border_type_ok()
-        if not ok:
-            if queued:
-                self.st.queued_behavior = queued
-            return False
-        if not self._dragging_ok():
-            return False
-        anim = self._current_anim()
-        if anim is None or not anim.poses:
-            return False
-        if self.real_elapsed >= anim.total_duration:
-            return False                      # one cycle done → advance to the next action
-        self.core.set_active_frame(anim.get_pose(self.real_elapsed))
-        return True
-
-
-class InPlaceAction(AnimationAction):
-    """Plays an animation loop WITHOUT moving the anchor.
-
-    Used by the app-level hide/show walk: App owns the window position (stepping it
-    toward the screen edge) while this action keeps the walk frames animating in
-    place, so the pet visibly walks off-screen instead of sliding frozen."""
-
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        anim = self._current_anim()
-        if anim is None or not anim.poses:
-            return False
-        pose = anim.get_pose(self.st.time - getattr(self, "_anim_t0", 0)) \
-            if hasattr(self, "_anim_t0") else anim.poses[0]
-        if not hasattr(self, "_anim_t0"):
-            self._anim_t0 = self.st.time
-        self.core.set_active_frame(pose)
-        return True
-
-
-class MoveAction(AnimationAction):   # Stay + TargetX/TargetY crossing (C++ `move::tick`)
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        ok, queued = self._border_type_ok()
-        if not ok:
-            if queued:
-                self.st.queued_behavior = queued
-            return False
-        if not self._dragging_ok():
-            return False
-        # look direction from target (C++ move::tick)
-        anim = self._current_anim()
-        if anim is None or not anim.poses:
-            return False
-        pose = anim.get_pose(self.st.time - self._anim_t0) if hasattr(self, "_anim_t0") else None
-        if pose is None:
-            self._anim_t0 = self.st.time
-            pose = anim.poses[0]
-        v = pose.velocity
-        st = self.st
-        start = Vec2(st.anchor.x, st.anchor.y)
-        if self.vars.has("TargetX"):
-            tx = float(self.vars.get_num("TargetX", st.anchor.x))
-            if v.x > 0:
-                st.looking_right = tx < st.anchor.x
-            elif v.x < 0:
-                st.looking_right = tx > st.anchor.x
-        elif self.vars.has("TargetY"):
-            ty = float(self.vars.get_num("TargetY", st.anchor.y))
-            vertical_dir = 1 if ty > st.anchor.y else -1
-        else:
-            return False                       # no target → end (C++ warns + finishes)
-        st.anchor.x += (-1 if st.looking_right else 1) * v.x
-        dyv = v.y
-        if self.vars.has("TargetY"):
-            dyv = abs(dyv) if vertical_dir == 1 else -abs(dyv)
-        st.anchor.y += dyv
-        self.core.set_active_frame(pose)
-
-        def crossed(axis_start: float, axis_now: float, target: float) -> bool:
-            return (axis_start >= target and axis_now <= target) or \
-                   (axis_start <= target and axis_now >= target)
-
-        if self.vars.has("TargetX"):
-            tx = float(self.vars.get_num("TargetX", st.anchor.x))
-            if crossed(start.x, st.anchor.x, tx):
-                st.anchor.x = tx
-                return False
-        elif self.vars.has("TargetY"):
-            ty = float(self.vars.get_num("TargetY", st.anchor.y))
-            if crossed(start.y, st.anchor.y, ty):
-                st.anchor.y = ty
-                return False
-        # animation loop wrap for velocity continuity (C++ uses pose cycle; we do the same)
-        if self.real_elapsed - getattr(self, "_move_t0_e", 0) >= anim.duration * 8:   # safety cap
-            pass
-        return True
-
-
-class FallAction(AnimationAction):   # C++ `fall.cc` per-tick integration + IE stick + clamps
-    def init(self, ctx: ActionCtx):
-        super().init(ctx)
-        self.velocity = Vec2(float(self.vars.get_num("InitialVX", 0.0)),
-                             float(self.vars.get_num("InitialVY", 0.0)))
-
-    def step(self) -> bool:
-        st, env = self.st, self.env
-        on_land = (env.floor.is_on(st.anchor) or env.ceiling.is_on(st.anchor)
-                   or env.work_area.is_on(st.anchor))
-        if self.real_elapsed > 0:      # C++: don't consider IE on the first tick
-            on_land = on_land or env.active_ie.is_on(st.anchor)
-        if on_land:
-            return False
-
-        if self.velocity.x != 0:
-            st.looking_right = self.velocity.x > 0
-
-        res_x = float(self.vars.get_num("RegistanceX", 0.05))
-        res_y = float(self.vars.get_num("RegistanceY", 0.1))
-        gravity = float(self.vars.get_num("Gravity", 2.0))
-        self.velocity.x -= (self.velocity.x * res_x)
-        self.velocity.y += (gravity - self.velocity.y * res_y)
-
-        before = Vec2(st.anchor.x, st.anchor.y)
-        st.anchor.x += self.velocity.x
-        st.anchor.y += self.velocity.y
-
-        near_floor = abs(st.anchor.y - env.floor.y) < BORDER_TOL
-        if st.anchor.x > env.work_area.right:
-            st.anchor.x = env.work_area.right
-            if near_floor:
-                st.anchor.y = env.floor.y - 1.1
-        elif st.anchor.x < env.work_area.left:
-            st.anchor.x = env.work_area.left
-            if near_floor:
-                st.anchor.y = env.floor.y - 1.1
-        if st.anchor.y < env.ceiling.y:
-            st.anchor.y = env.ceiling.y
-        elif st.anchor.y > env.floor.y:
-            st.anchor.y = env.floor.y
-
-        # IE_STICK (C++ macro): if this step crossed a tracked-window border from outside to
-        # inside (staying within the window's range on the other axis), snap the anchor onto
-        # that border — how falling "lands" on window tops/sides/bottom.
-        ie = env.active_ie
-        if ie.visible:
-            y_in_range = ie.top - BORDER_TOL <= st.anchor.y <= ie.bottom + BORDER_TOL
-            x_in_range = ie.left - BORDER_TOL <= st.anchor.x <= ie.right + BORDER_TOL
-            if before.x < ie.left and st.anchor.x >= ie.left and y_in_range:
-                st.anchor.x = ie.left                       # crossed the window's left wall
-            elif before.x > ie.right and st.anchor.x <= ie.right and y_in_range:
-                st.anchor.x = ie.right                      # ...right wall
-            elif before.y < ie.top and st.anchor.y >= ie.top and x_in_range:
-                st.anchor.y = ie.top                        # ...top edge (window-top landing)
-            elif before.y > ie.bottom and st.anchor.y <= ie.bottom and x_in_range:
-                st.anchor.y = ie.bottom                     # ...bottom edge
-
-        # Wall grip (C++ Fall.hasNext(): the fall ENDS when the mascot reaches a wall,
-        # leaving it ON the wall so the Fall's GrabWall branch — and the ambient wall
-        # pool — runs. This is how a sideways throw "grabs" a wall/ceiling instead of
-        # sliding down to the floor.) The work-area clamp above already pins the anchor to
-        # a side wall, so the 1px border check never skips even at high velocity.
-        a = st.anchor
-        if (env.work_area.left_border().is_on(a) or env.work_area.right_border().is_on(a)
-                or (ie.visible and (ie.left_border().is_on(a) or ie.right_border().is_on(a)))):
-            return False
-
-        anim = self._current_anim()
-        if anim is not None:
-            pose = anim.get_pose(self.st.time - getattr(self, "_anim_t0", 0)) \
-                if hasattr(self, "_anim_t0") else anim.poses[0]
-            if not hasattr(self, "_anim_t0"):
-                self._anim_t0 = self.st.time
-            self.core.set_active_frame(pose)
-        return True
-
-
-class JumpAction(AnimationAction):   # C++ `jump.cc` — aim toward TargetX/TargetY with an arc
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        st = self.st
-        tx = float(self.vars.get_num("TargetX", st.anchor.x))
-        ty = float(self.vars.get_num("TargetY", st.anchor.y))
-        st.looking_right = st.anchor.x < tx
-        dxv, dyv = tx - st.anchor.x, ty - st.anchor.y - abs(tx - st.anchor.x)
-        speed = float(self.vars.get_num("VelocityParam", 20.0))
-        dist = (dxv * dxv + dyv * dyv) ** 0.5
-        if dist > 1e-6:
-            st.anchor.x += speed * dxv / dist
-            st.anchor.y += speed * dyv / dist
-        anim = self._current_anim()
-        if anim is not None and anim.poses:
-            self.core.set_active_frame(anim.get_pose(self.st.time - getattr(self, "_anim_t0", 0))
-                                       if hasattr(self, "_anim_t0") else anim.poses[0])
-            if not hasattr(self, "_anim_t0"):
-                self._anim_t0 = st.time
-        if dist <= speed:
-            st.anchor.x, st.anchor.y = tx, ty
-            return False
-        return True
-
-
-class InstantAction(Action):         # Offset / Look — one effect, then advance (C++ `instant`)
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        st = self.st
-        kind = getattr(self, "kind", "")
-        if kind == "offset":
-            dxv = float(self.vars.get_num("X", 0.0))
-            dyv = float(self.vars.get_num("Y", 0.0))
-            st.anchor.x += dxv
-            st.anchor.y += dyv
-        elif kind == "look":
-            lr = self.vars.get_bool("LookRight", not st.looking_right)
-            st.looking_right = bool(lr)
-        return False                 # always finishes after one tick
-
-
-class SequenceAction(Action):        # runs child actions in order (Loop attr optional)
-    def __init__(self, attrs, core, children: list[Action]):
-        super().__init__(attrs, core)
-        self.children = children or []
-        self._idx = -1
-
-    def init(self, ctx: ActionCtx):
-        # Sequence/Select force Loop=false for Select via overlay (C++ select::init)
-        super().init(ctx)
-        self._idx = -1
-        self.next_child()
-
-    def finalize(self):
-        for c in self.children:
-            if c.active:
-                c.finalize()
-        super().finalize()
-
-    def next_child(self):
-        if 0 <= self._idx < len(self.children) and self.children[self._idx].active:
-            self.children[self._idx].finalize()
-        self._idx += 1
-        if self._idx >= len(self.children):
-            loop = bool(self.vars.get_bool("Loop", False))
-            if not loop:
-                return
-            self._idx = 0
-        if self._idx < len(self.children):
-            child = self.children[self._idx]
-            try:
-                child.init(ActionCtx(self.core, None))
-            except MalformedAction as exc:   # bad child → skip it (stay alive)
-                logger.warning("skipping malformed action %s", exc)
-                self.next_child()
-
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        attempts = 0
-        max_attempts = len(self.children) + 1
-        while True:
-            child = self._child()
-            if child is None:
-                # sequence ended; try next (handles a run of instant actions)
-                self.next_child()
-                child = self._child()
-                if child is None:
-                    return False
-                attempts += 1
-                continue
-            ok = child.subtick(0)
-            if self.st.queued_behavior or attempts >= max_attempts:
-                break
-            if ok:
-                return True           # still running this tick
-            self.next_child()         # child finished → advance
-            attempts += 1
-        return not (self._child() is None and not self.st.queued_behavior)
-
-    def _child(self):
-        if 0 <= self._idx < len(self.children):
-            c = self.children[self._idx]
-            if c.active:
-                return c
-            # finalize stale child then re-init (sequence that ended mid-run)
-            c.finalize()
-            try:
-                c.init(ActionCtx(self.core, None))
-                return c if c.active else None
-            except MalformedAction as exc:
-                logger.warning("child action failed to restart: %s", exc)
-        return None
-
-
-class SelectAction(SequenceAction):
-    """First child whose Condition holds wins; re-evaluated periodically while running; ends
-    when the selected branch finishes (C++ `select` — no re-picking after completion)."""
-
-    _recheck_ticks = 20          # ~0.8 s at mascot.tick_ms 40
-
-    def __init__(self, attrs, core, children):
-        super().__init__(attrs, core, children)
-        self._cond_vars: list[Optional[ActionVars]] = []
-
-    def _cond(self, i: int) -> Optional[ActionVars]:
-        while len(self._cond_vars) <= i:
-            self._cond_vars.append(None)
-        if self._cond_vars[i] is None:
-            self._cond_vars[i] = ActionVars(
-                self.children[i].init_attrs, lambda: core_view(self.core), self.core.rng)
-        return self._cond_vars[i]
-
-    def _matches(self, i: int) -> bool:
-        try:
-            av = self._cond(i)
-            if not av.has("Condition"):
-                return True
-            return bool(av.resolve("Condition"))
-        except Exception:
-            return False
-
-    def _select(self) -> int:
-        for i in range(len(self.children)):
-            if self._matches(i):
-                return i
-        return -1
-
-    def _start(self, i: int) -> bool:
-        if 0 <= i < len(self.children):
-            try:
-                self.children[i].init(ActionCtx(self.core, None))
-            except MalformedAction as exc:
-                logger.warning("skipping malformed action %s", exc)
-                return False
-        return True
-
-    def next_child(self):
-        if 0 <= self._idx < len(self.children) and self.children[self._idx].active:
-            self.children[self._idx].finalize()
-        self._idx = self._select()
-        self._start(self._idx)
-
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        if self.real_elapsed > 0 and self.real_elapsed % self._recheck_ticks == 0:
-            chosen = self._select()
-            if chosen != self._idx:
-                if 0 <= self._idx < len(self.children) and self.children[self._idx].active:
-                    self.children[self._idx].finalize()
-                self._idx = chosen
-                self._start(self._idx)
-        if not (0 <= self._idx < len(self.children)):
-            return True                    # no branch matches yet → keep waiting
-        child = self.children[self._idx]
-        if not child.active:
-            return False                   # selected branch finished → Select is done
-        ok = child.subtick(0)
-        if self.st.queued_behavior:
-            return False                   # pre-empted by an external force
-        if not ok:
-            # The selected branch finished — end the Select (C++ ComplexAction.hasNext()
-            # is false once the current child's hasNext() is false). Do NOT re-init it:
-            # re-initing the finished branch here is what kept the pet looping
-            # Bouncing/Stand/Fall forever instead of returning to ambient behavior.
-            return False
-        return True
-
-
-class ReferenceAction(Action):       # <ActionReference Name=... TargetX=.../> indirection
-    def __init__(self, attrs, core):
-        super().__init__(attrs, core)
-        self.target: Optional[Action] = None
-
-    def link(self, target: Action):
-        if self.target is not None and self.target is not target:
-            raise MalformedAction(self.name(), "reference already linked")
-        self.target = target
-
-    def init(self, ctx: ActionCtx):
-        super().init(ctx)
-        if self.target is None:
-            raise MalformedAction(self.name(), f"unlinked reference (action {self.init_attrs.get('Name')!r} missing)")
-        # The reference's OWN attributes are the overlay for the target (C++ ReferenceAction
-        # passes its vars to the target's init). Before, we forwarded `ctx.extra_attr` — which
-        # is None for a top-level sequence child — so every reference overlay (InitialVX/VY,
-        # TargetX/Y, Duration, Gap, LookRight, ...) was silently dropped. That made Thrown's
-        # InitialVX=${cursor.dx} launch with zero horizontal velocity and broke target-based
-        # Walk/Move/Jump references.
-        try:
-            self.target.init(ActionCtx(self.core, self.init_attrs))
-        except MalformedAction:
-            raise
-
-    def finalize(self):
-        if self.target is not None:
-            try:
-                self.target.finalize()
-            except Exception:      # noqa: BLE001 - finalize must never block a transition
-                pass
-        super().finalize()
-
-    def step(self) -> bool:
-        return self.target.subtick(0) if self.target else False
-
-
-# --------------------------------------------------------------------------- helpers ----
-def core_view(core: "MascotCore") -> JSMascot:
-    return core.js_view
-
-
-_STRIP_EXPR = "${"
-
-
-def is_true_js(s: str) -> bool:
-    s = (s or "").strip().lower()
-    return s in ("true", "")
-
-
-def strip_js_expr(js: str) -> str:
-    js = (js or "").strip()
-    for pre, post in (("${", "}"), ("#{", "}")):
-        if js.startswith(pre) and js.endswith(post):
-            return js[len(pre):-len(post)]
-    return js
 
 
 # --------------------------------------------------------------------------- the core ----
@@ -868,7 +79,10 @@ class MascotCore:
         self.initial_pool: "_PoolSource" = _FlatSources([])
         self._active_behavior_node: Optional[BehaviorNode] = None
         self.active_action: Optional[Action] = None
-        self._init_count = 0                          # C++ reached_init_limit guard
+        # C++ reached_init_limit guard, tracked PER BEHAVIOR so an unrelated successful
+        # fallback (e.g. forcing Fall after a broken pick) can't reset the streak.
+        self._init_fail: dict[str, int] = {}
+        self._broken: set[str] = set()                # behaviors excluded after repeated init failure
 
     # -- parsing ---------------------------------------------------------------
     def parse(self, actions_xml_path: Union[str, Path], behaviors_xml_path: Union[str, Path]):
@@ -1153,9 +367,15 @@ class MascotCore:
             return d
 
         if queued_name:
-            node = find(queued_name).node          # forced → pool becomes that behavior's next list
-            self._next_pool_srcs = _PoolSourcesOf(find(queued_name))
-            return node
+            d = defs.get(queued_name)
+            if d is None:
+                # A forced name that isn't defined must not wedge the pet: log and fall
+                # through to the ambient roulette/fallback instead of raising KeyError
+                # every tick (review finding C7).
+                logger.warning("forced behavior %r not defined; falling back to ambient", queued_name)
+            else:
+                self._next_pool_srcs = _PoolSourcesOf(d)
+                return d.node
 
         sources: list[_PoolSource] = list(getattr(self, "_current_pool", self.initial_pool))
         flat = []                                   # (BehaviorDef-ish source) with conditions evaluated
@@ -1170,10 +390,11 @@ class MascotCore:
                 if self._ref_ok(src):
                     flat.append(src)
 
-        # drop excluded (user toggles / solo-pet breeding list) + hidden (not ambient-selectable)
+        # drop excluded (user toggles / solo-pet breeding list) + broken (repeated init
+        # failure) + hidden (not ambient-selectable)
         def keep(s: _PoolSource) -> bool:
             nm = s.name
-            return nm not in self.excluded and not find(nm).node.hidden
+            return nm not in self.excluded and nm not in self._broken and not find(nm).node.hidden
         flat = [s for s in flat if keep(s)]
 
         # single candidate → take it (C++); else weighted pick; no candidates → Fall fallback
@@ -1202,9 +423,10 @@ class MascotCore:
         return node
 
     def _ref_ok(self, src: "_PoolSource") -> bool:
-        """A named ref is valid if the behavior exists AND (for refs into action lists) the action parses."""
+        """A named ref is valid if the behavior exists, hasn't been excluded after
+        repeated init failure, AND (for refs into action lists) the action parses."""
         d = self.behavior_defs.get(src.name)
-        return d is not None and d.node.action is not None
+        return d is not None and src.name not in self._broken and d.node.action is not None
 
     def _cond_true(self, cond_js: str) -> bool:
         js = strip_js_expr((cond_js or "").strip())
@@ -1269,14 +491,21 @@ class MascotCore:
         try:
             act.init(ActionCtx(self))
         except (MalformedAction, parse_error) as exc:
-            # count CONSECUTIVE failures; only a genuinely broken behavior trips the limit
-            self._init_count += 1
-            if self._init_count >= 20:      # C++ reached_init_limit → stop trying, let caller reset
-                self._init_count = 0
-                raise MalformedAction(node.name, "reached init limit") from exc
+            # count consecutive failures PER BEHAVIOR; only a genuinely broken one trips the
+            # limit. C++ reached_init_limit → stop trying: exclude it so the ambient roulette
+            # stops re-picking it (review finding C8). Never raise — the ladder still
+            # recovers, and raising would kill the tick loop. An unrelated success (e.g. the
+            # forced-Fall fallback) must NOT reset another behavior's streak.
+            n = self._init_fail.get(node.name, 0) + 1
+            self._init_fail[node.name] = n
+            if n >= 20:
+                self._init_fail[node.name] = 0
+                self._broken.add(node.name)
+                logger.warning("behavior %r failed to start 20x; excluding it", node.name)
+                return False
             logger.warning("behavior %r failed to start (%s); re-picking", node.name, exc)
             return False
-        self._init_count = 0                # success resets the failure streak
+        self._init_fail[node.name] = 0      # success clears this behavior's streak
         self.active_action = act
         self._active_behavior_node = node
         self.on_behavior_changed(node.name)   # hook (no-op by default; App wires logging/sounds)
@@ -1323,8 +552,9 @@ class MascotCore:
                     return
             except MalformedAction as exc:
                 logger.warning("tick recovery (attempt %d): %s", attempt + 1, exc)
-            # escalate: force Fall → detach from borders → reset position (C++ manager::tick)
-            self._init_count = 0
+            # escalate: force Fall → detach from borders → reset position (C++ manager::tick).
+            # NOTE: we intentionally do NOT reset _init_count here — consecutive init
+            # failures must accumulate across ticks so the exclusion guard (C8) can fire.
             st.queued_behavior = "Fall" if attempt >= 1 else ""
             if attempt == 2:
                 self.detach_from_borders()
@@ -1340,116 +570,19 @@ class MascotCore:
         return self.state.behavior_name
 
 
-# --------------------------------------------------------------------------- support ----
-class _NoOpAction(Action):     # solo-pet degradation target for unrunnable types (one-tick advance)
-    def __init__(self, attrs, core, name=""):
-        super().__init__(attrs, core)
-        if name:
-            self.init_attrs.setdefault("Name", name)
-
-    def step(self) -> bool:
-        return False
-
-
-class _NoOpInline(Action):
-    def __init__(self, attrs=None, core=None):
-        super().__init__(dict(attrs or {}), core)
-
-    def init(self, ctx: ActionCtx):
-        self.active = True
-        self.real_start = getattr(self, "real_start", 0)
-        self.vars = ActionVars({}, lambda: None, None)   # no keys → condition_ok/duration_ok True
-
-    def step(self) -> bool:
-        return False
-
-
-class _DraggableAction(AnimationAction):   # Dragged / Regist pose sets (in-place while held)
-    def init(self, ctx: ActionCtx):
-        super().init(ctx)
-        st = self.core.state
-        st.foot_x = self.env.cursor.x        # pendulum starts on the cursor (C++ Dragged.init)
-        st.foot_dx = 0.0
-
-    def step(self) -> bool:
-        if not self.tick_ok():
-            return False
-        # Pendulum (C++ Dragged): footDx = (footDx + (cursorX - footX)*0.1)*0.8 — a damped
-        # oscillator that keeps FootX swinging back and forth around the cursor even after it
-        # stops moving. The Pinched lean conditions (FootX < cursor.x - N) then alternate, so
-        # the pet visibly sways like a pendulum instead of holding one lean pose.
-        st = self.st
-        base = st.foot_x if st.foot_x is not None else self.env.cursor.x
-        st.foot_dx = (st.foot_dx + (self.env.cursor.x - base) * 0.1) * 0.8
-        st.foot_x = base + st.foot_dx
-        # `_current_anim()` picks the AnimList whose #{Condition} holds (C++ Pinched picks
-        # the pose by FootX-vs-cursor distance); play its pose in place — x follows the cursor (UI).
-        anim = self._current_anim()
-        if anim is None or not anim.poses:
-            return False
-        if not st.dragging:           # released mid-Dragged behavior → physics via Thrown/Fall
-            return False
-        pose = anim.get_pose(self.real_elapsed)
-        st.anchor.y += pose.velocity.y        # vertical component only; x follows the cursor (UI)
-        self.core.set_active_frame(pose)
-        return True
-
-
-# -- behavior pool source types ---------------------------------------------------------
-class _PoolSource:
-    name = ""
-    cond_js = ""
-
-    @property
-    def frequency(self):  # resolved by the core via defs; kept for clarity
-        raise NotImplementedError
-
-
-class _NamedSource(_PoolSource):     # a <Behavior> entry (or BehaviorReference) in a pool
-    __slots__ = ("name", "cond_js", "freq")
-
-    def __init__(self, name: str, cond_js: str = "", freq: int = 0):
-        self.name, self.cond_js, self.freq = name, cond_js, freq   # freq>0 overrides the def's own
-
-
-class _GroupSources(_PoolSource):    # a <Condition> group containing behaviors
-    __slots__ = ("cond_js", "sub")
-
-    def __init__(self, cond_js: str, sub: list[_PoolSource]):
-        self.cond_js, self.sub = cond_js, sub
-
-
-class _FlatSources(list):            # plain flat list of sources (top-level BehaviorList / next pools)
-    pass
-
-
-def _PoolSourcesOf(defn: "BehaviorDef", initial=None, add_next=False) -> "_FlatSources":
-    """The pool that follows picking `defn`: its <NextBehavior> refs; Add=true also keeps the initial list."""
-    srcs = [_NamedSource(n.name, n.cond_js) for n in defn.next_children] \
-        if isinstance(defn.next_children, list) and defn.next_children and \
-           isinstance(defn.next_children[0], _PoolSource) else []
-    # (next_children parsed as named sources already; nothing extra to build here)
-    out = _FlatSources()
-    if add_next and initial is not None:
-        out.extend(initial)                 # keep initial pool (conditions re-evaluated at pick time)
-    out.extend(srcs)
-    return out
-
-
-class BehaviorDef:
-    __slots__ = ("node", "next_children", "add_next")
-
-    def __init__(self, node: BehaviorNode, next_children: list, add_next: bool):
-        self.node = node
-        self.next_children = next_children     # list[_NamedSource] (with cond_js)
-        self.add_next = add_next
-
-
 def _js_truthy(v) -> bool:
+    # Fail CLOSED (falsy) for unknown/undefined/NaN — matching js_truthy in
+    # mascot_environment and the documented "exotic behaviors degrade safely"
+    # contract. The old version mishandled the env `_UNDEFINED` sentinel (no
+    # __len__ → TypeError → True) and NaN (v != 0 → True) — review finding B6.
     if v is None or isinstance(v, _UNDEFINED_TYPE2):
+        return False
+    if is_undefined(v):                     # the environment's _UndefinedType sentinel
         return False
     if isinstance(v, bool):
         return v
+    if isinstance(v, float) and math.isnan(v):
+        return False
     if isinstance(v, (int, float)):
         return v != 0
     if isinstance(v, str):
@@ -1457,33 +590,28 @@ def _js_truthy(v) -> bool:
     try:
         return len(v) > 0
     except TypeError:
-        return True
+        return False
 
 
-# -- tiny XML helpers (namespace-agnostic; shimeji files use the group-finity namespace) --
-def local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
-
-
-def ns_el(el_tag: str) -> str:
-    return el_tag.rsplit("}", 1)[0] + "}" if "}" in el_tag else ""
-
-
-def _attr_of(el: ET.Element, name: str, default=None):
-    for k, v in el.attrib.items():
-        if local_name(k) == name:
-            return v
-    return default
-
-
-def _attrs(el: ET.Element) -> list[tuple[str, str]]:
-    return [(local_name(k), v) for k, v in el.attrib.items()]
-
-
-def _iter_elements(doc: ET.ElementTree):
-    root = doc.getroot()
-    yield from [root] + list(root.iter())
-
-
-def _load(path: Union[str, Path]) -> ET.ElementTree:
-    return ET.parse(str(path))
+# --------------------------------------------------------------------------- facade ----
+# Re-export the leaf-module public API so consumers (tests + mascot_engine_widget) can keep
+# importing from `vaultsprite.mascot_engine` unchanged. Everything above is already in this
+# namespace via the imports at the top; this block just documents the intended public surface.
+__all__ = [
+    # core + state
+    "MascotCore", "MascotState", "Pose", "AnimList",
+    # data / pool
+    "BehaviorNode", "BehaviorDef", "_PoolSource", "_NamedSource", "_GroupSources",
+    "_FlatSources", "_PoolSourcesOf", "_BehaviorList", "_PoolEntry",
+    # vars
+    "ActionVars", "_UNDEFINED", "_UNDEFINED_TYPE2", "_DynOnce", "_coerce_literal",
+    # actions
+    "Action", "ActionCtx", "MalformedAction", "AnimationAction", "StayAction",
+    "AnimateAction", "InPlaceAction", "MoveAction", "FallAction", "JumpAction",
+    "InstantAction", "SequenceAction", "SelectAction", "ReferenceAction",
+    "_NoOpAction", "_NoOpInline", "_DraggableAction", "core_view", "is_true_js",
+    "strip_js_expr", "_js_truthy",
+    # environment re-exports commonly used by callers
+    "BORDER_TOL", "DArea", "DVec2", "ExpressionCompiler", "JSMascot",
+    "MascotEnvironment", "Vec2", "parse_error",
+]

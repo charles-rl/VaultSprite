@@ -34,6 +34,14 @@ All temporary clones have been deleted. **Each module folder is self-contained**
 
 > Module 9 reference **changed 2026-08-17**: `pixelomer/Shijima-Qt`/`libshijima` (C++/GPL) → `DalekCraft2/Shimeji-Desktop` (canonical Shimeji-ee, JDK 25, New-BSD/zlib). The clone was extracted into `docs/09_mascot_engine/source/` then deleted per policy; patterns ported to pure Python; the *data* side ships as a standard Shimeji pack (`assets/steve_shimeji/conf/*.xml`).
 
+> **M9 code review (2026-08-18)** — 10 verified M9 bugs fixed + 11 regression tests; full
+> findings/fix order in `docs/M9_CODE_REVIEW.md` (cross-checked against the Java reference).
+
+> Module 9 structure **changed 2026-08-18**: the engine was split out of one 1489-line
+> `mascot_engine.py` into `mascot_engine.py` (`MascotCore` + facade), `mascot_actions.py`,
+> `mascot_data.py`, `mascot_vars.py` and `mascot_xml.py` (+ unchanged `mascot_environment.py`).
+> `mascot_engine` stays the single public import surface. See `docs/09_mascot_engine/README.md` §5.
+
 ## Key Findings & Divergences From The Outline (read before implementing)
 
 1. **Module 5 reference changed** (approved 2026-08-16): dead repo `lethee/get_active_window` → `Kalmat/PyWinCtl`. `IMPLEMENTATION_OUTLINE.md` updated accordingly. PyWinCtl raises `NotImplementedError` on unsupported platforms — `context_detector.py` must guard the import.

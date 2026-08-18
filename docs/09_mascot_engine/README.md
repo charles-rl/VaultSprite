@@ -29,6 +29,13 @@ Extraction sources:
 `MascotCore`/`mascot_environment` import **no Qt** — they unit-test by calling `core.tick()`
 directly (same style as terrain/stat tests).
 
+**Structural split (2026-08-18):** the engine is spread across
+`mascot_engine.py` (**`MascotCore` + facade** re-exporting the public API),
+`mascot_actions.py` (action runners), `mascot_data.py` (pose/animation + behavior-pool
+types), `mascot_vars.py` (`ActionVars` `${once}`/`#{per-tick}` store) and `mascot_xml.py`
+(namespace-agnostic XML helpers), plus `mascot_environment.py` (geometry + whitelist
+evaluator). See §5 for the module map.
+
 ## 3. Source Code Extraction (Verbatim)
 
 Full verbatim Java sources from `DalekCraft2/Shimeji-Desktop` are kept under `source/`:
@@ -146,13 +153,29 @@ crashing the pet. Observed tokens: numbers, `+ - * /`, comparisons, `&& ||`, par
 
 ## 5. Refactoring & Integration Notes
 
-Target: `vaultsprite/mascot_engine.py` (`MascotCore`, pure Python) + `mascot_environment.py`
-(geometry + evaluator), with a thin `MascotEngine(QObject)` owning the `QTimer` and signals in the
+Target: a pure-Python engine + a thin `MascotEngine(QObject)` owning the `QTimer` and signals in the
 UI layer. `App` stays the sole owner of *external* animation-force decisions.
 
-1. **Two-class split**: `MascotCore` has no Qt import → unit-tested by `core.tick()`. The QObject
-   wrapper owns `QTimer` (`mascot.tick_ms: 40`), emits `pose_changed` / `behavior_changed` /
-   `fell_down` / telemetry; `App` wires those.
+0. **Module map (structural split, 2026-08-18)** — the engine was split out of one 1489-line
+   `mascot_engine.py` into focused files so each has one concern (dependency graph is acyclic;
+   the action runners talk to the core only through the duck-typed `self.core` + string type-hints,
+   so `mascot_actions` never imports `MascotCore`):
+
+   | Module | Responsibility | Depends on |
+   |---|---|---|
+   | `mascot_engine.py` | **`MascotCore`** (parser, behavior roulette, tick loop, 4-level recovery ladder) + **facade** re-exporting the whole public API; `_js_truthy` | all below |
+   | `mascot_actions.py` | action runners `Action`/`AnimationAction`/`Stay`/`Move`/`Fall`/`Jump`/`Sequence`/`Select`/`Reference`/`Instant`/`_Draggable`/`_NoOp*` + `core_view`/`is_true_js`/`strip_js_expr` | environment, vars, data |
+   | `mascot_data.py` | `Pose`, `AnimList`, `MascotState`, `BehaviorNode`, `BehaviorDef`, pool-source types, `_PoolSourcesOf` | environment |
+   | `mascot_vars.py` | `ActionVars`, `_UNDEFINED`, `_DynOnce`, `_coerce_literal` (`${once}` / `#{per-tick}`) | environment |
+   | `mascot_xml.py` | namespace-agnostic XML helpers (`local_name`, `_attr_of`, `_attrs`, `_iter_elements`, `_load`) | stdlib |
+   | `mascot_environment.py` | geometry (`BORDER_TOL`, areas/borders) + whitelist expression evaluator (`ExpressionCompiler`, `JSMascot`) | stdlib |
+
+   `tests/test_mascot_engine.py` and `mascot_engine_widget.py` import from
+   `vaultsprite.mascot_engine` only (the facade) — keep it the single public import surface.
+
+1. **Core is pure Python / no Qt** → unit-tested by `core.tick()`. The QObject wrapper owns
+   `QTimer` (`mascot.tick_ms: 40`), emits `pose_changed` / `behavior_changed` / `fell_down` /
+   telemetry; `App` wires those.
 2. **Coordinate space**: everything in logical Qt px (contract shared with terrain_physics); win32
    window rects get the `devicePixelRatio()` divide at the bridge.
 3. **Frame decoding** in the UI layer: `QImageReader().read()` single-read per frame, cached; per-pose

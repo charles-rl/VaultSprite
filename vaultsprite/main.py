@@ -429,6 +429,9 @@ class App(QObject):
         self._hide_restore = self.window.position()
         self._hide_target = self._hide_edge_target()
         if self.mascot is not None:
+            # the engine anchor is the sprite's FEET — restore that, not the window
+            # top-left, or the reveal sync would jump the pet by ~half its size.
+            self._hide_anchor = self.mascot.anchor()
             # walk off using the engine's walk frames (position-locked; App owns the walk)
             self.mascot.set_hide_walk(True, moving_right=self._hide_target[0] > self._hide_restore[0])
         else:
@@ -488,7 +491,7 @@ class App(QObject):
             return
         # back on screen: hand the anchor back to the engine and resume autonomy
         if self.mascot is not None:
-            rx, ry = self._hide_restore or self.window.position()
+            rx, ry = getattr(self, "_hide_anchor", None) or self.window.position()
             self.mascot.sync_anchor(rx, ry)
             self.mascot.set_hide_walk(False)     # stop the position-locked walk
             self.mascot.set_hidden(False)        # resume ambient (no re-seed)

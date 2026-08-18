@@ -1,23 +1,16 @@
-# User feedback — resolved 2026-08-17
+# User feedback — resolved 2026-08-17 (latest pass)
 
-Recent items (the swing/throw/vision pass) all fixed. Full history lives in `git log` + `BUILD_NOTES.md`.
+Fixed in commit `e1878ff` (full history: `git log` + `BUILD_NOTES.md` §9).
 
-| # | Note | Resolution |
-|---|---|---|
-| 10 | Mascot doesn't sway when swinging Steve | Fixed: inverted conditional-branch skip + missing `FootX` in M9 engine. |
-| 11 | Sprite snaps back to spawn / keeps falling after a swing | Fixed: sync anchor to release feet on drag; forward `ActionReference` overlay attrs (throw now has real velocity). |
-| 12 | "Ask what I see" freezes the GUI | Fixed: blocking LLM call actually runs off-thread (`QThread.run()`); "Thinking…" bubble + thread-id logging added. |
-| 13 | Log debug info to the Vault | Done: drag/throw telemetry → `Memory/Debug/mascot-<day>.md`. |
-| 14 | Swap base_url on Linux | No code change: `OLLAMA_BASE_URL` env overrides config. |
+| Note | Resolution |
+|---|---|
+| Bubble (thinking/response) not aligned to the sprite | Size the bubble before positioning (was dead-center) + anchor to the sprite's opaque bounds. |
+| Top-left debug text not aligned to its box | Padding moved onto the telemetry label. |
+| Sway correct but no pendulum swing-back | Ported C++ Dragged `FootX`/`FootDX` damped oscillator — now leans while moving and swings/settles. |
+| Throw at high speed never comes back | Landing no longer loops (Animate one-cycle + Select ends on finish); pet returns to ambient. |
+| Hide should use the walk animation | Synthetic `HideWalk` behavior plays walk frames while App owns the walk; engine freezes only off-screen. |
+| Walking animation flipped | Pack art is left-facing; mirror when `looking_right`. |
+| Lands → spams shime18 in an infinite loop | `Animate` runs one cycle; `Select` no longer re-inits its finished branch. |
+| Wall-climb / ceiling-grab never used | FallAction grips walls so throws reach the wall/ceiling climb pool. |
 
-Housekeeping: **115 tests pass**, `--smoke` exit 0, `tools/render_check.py` PASS. Commit `1593dcd`; push pending (no credentials in this shell).
-
-# Recent User Feedback
-- The chat bubble when thinking or even responding is not aligned to the actual sprite
-- The debug on the top left is not aligned to the actual text like the box it is in.
-- The sway is correct but there is no gravity like the original implementation, you may clone the repo in the project root to check then delete. Basically, it sways but after it sways, it doesn't swing back and forth like a pendulum.
-- I can throw it at super high speeds and it doesn't come back again. Check the debug logs.
-- Hiding the pet is correct but it should use its walk animation
-- The walking animation is opposite or flipped.
-- The main bug is that after it lands when I drop it, it spams the shime18 animation. Like the water bucket landing animation and is stuck at an infinite loop.
-- I notice that there is climbing walls animations and grabbing ceilings but it never utilizes that but maybe it is because it is usually stuck indefinitely in the falling loop.
+Housekeeping: **122 tests pass**, `--smoke` exit 0, `tools/render_check.py` PASS.

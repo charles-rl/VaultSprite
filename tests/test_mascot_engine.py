@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from vaultsprite.mascot_engine import ActionCtx, MascotCore, _NoOpInline
-from vaultsprite.mascot_environment import DArea, HBorder, MascotEnvironment, Vec2
+from vaultsprite.mascot_engine import ActionCtx, MascotCore, _NoOpInline, _js_truthy
+from vaultsprite.mascot_actions import ReferenceAction
+from vaultsprite.mascot_environment import DArea, ExpressionCompiler, HBorder, MascotEnvironment, Vec2, is_undefined
 
 W, H = 1280, 800
 REPO = Path(__file__).resolve().parent.parent
@@ -289,3 +290,169 @@ def test_reference_overlay_attrs_reach_target():
         core.tick()
     assert core.state.anchor.x > start_x + 20, \
         f"Walk never moved toward its TargetX (start={start_x:.0f} end={core.state.anchor.x:.0f})"
+
+
+# -- 2026-08-18 code-review pass: verified M9 fixes (see .opencode/plans/m9-code-review.md) --
+
+def _run_fall(core, anchor):
+    """Force a Fall from `anchor`; returns True if the Bouncing splash (shime18) played."""
+    core.state.anchor = Vec2(*anchor)
+    core.state.dragging = False
+    core.force_behavior("Fall")
+    bounced = False
+    for _ in range(300):
+        core.tick()
+        f = core.state.active_frame.image if core.state.active_frame else ""
+        if "shime18" in f:
+            bounced = True
+    return bounced
+
+
+def test_select_conditions_reevaluate_per_run():
+    """A2 regression: a Fall's Select branch `${...}` condition must re-resolve once per
+    action run. Previously the shared Select instance latched the FIRST run's choice, so a
+    later floor fall kept GrabWall (no Bouncing) forever after an earlier wall fall."""
+    core = make_core(seed=5)
+    assert _run_fall(core, (W, 200)) is False        # wall grip -> GrabWall, no bounce
+    assert _run_fall(core, (W // 2, 100)) is True    # floor landing -> Bouncing splash
+
+
+def test_climbwall_condition_sees_targety_and_moves():
+    """B5 regression: an <Animation> Condition referencing a bare action attribute
+    (ClimbWall's `#{TargetY < mascot.anchor.y}`) must see that var via the reference
+    overlay — otherwise the climb has no effective animation and never moves."""
+    core = make_core(seed=3)
+    act = core.actions["ClimbWall"]
+    while isinstance(act, ReferenceAction):
+        act = act.target
+    ref = ReferenceAction(
+        {"Name": "ClimbWall", "TargetY": "#{mascot.environment.workArea.bottom-64}"}, core)
+    ref.link(act)
+    core.state.anchor = Vec2(W - 0.5, H - 20)        # anchored on the right wall
+    core.state.dragging = False
+    ref.init(ActionCtx(core, None))
+    assert act._current_anim() is not None, "TargetY-based animation branch never selected"
+    y0 = core.state.anchor.y
+    for _ in range(50):
+        core.state.time += 1                     # the engine's pre_tick would do this
+        if not act.step():
+            break
+    assert core.state.anchor.y < y0 - 10, f"ClimbWall never climbed (y {y0:.0f}->{core.state.anchor.y:.0f})"
+
+
+def test_no_match_select_advances_not_blocks():
+    """A3 regression: a Select with no matching branch must END (so the parent Sequence
+    advances) instead of returning True forever. ChaseMouse's IE-only Select used to
+    freeze the pet with zero rendered frames when no window was tracked."""
+    core = make_core(seed=4)
+    core.state.anchor = Vec2(W // 2, H)
+    core.state.dragging = False
+    core.force_behavior("ChaseMouse")
+    frames = set()
+    for _ in range(40):
+        core.tick()
+        if core.state.active_frame is not None:
+            frames.add(core.state.active_frame.image)
+    assert frames, "no-match Select blocked the sequence; pet never rendered a frame"
+
+
+def test_unknown_forced_behavior_falls_back():
+    """C7 regression: forcing an undefined behavior name must not raise KeyError and wedge
+    the engine — it logs and falls back to the ambient roulette (queue cleared)."""
+    core = make_core()
+    core.state.anchor = Vec2(W // 2, H)
+    core.force_behavior("NonExistent")
+    for _ in range(20):
+        core.tick()                                    # must not raise
+    assert core.state.queued_behavior == ""
+    assert core.active_behavior_name, "pet never recovered into a behavior"
+
+
+def test_broken_behavior_excluded_after_repeated_failures():
+    """C8 regression: a behavior whose action always fails init is excluded after 20
+    consecutive failures (previously the guard was dead code and it re-picked forever)."""
+    from vaultsprite.mascot_actions import Action, MalformedAction
+
+    class Broken(Action):
+        def init(self, ctx):
+            self.active = True
+            raise MalformedAction("Broken", "always fails")
+
+        def step(self):
+            return False
+
+    core = make_core()
+    target = "SitDown" if "SitDown" in core.behavior_defs else "SitAndFaceMouse"
+    core.behavior_defs[target].node.action = Broken({}, core)
+    core.state.anchor = Vec2(W // 2, H)
+    for _ in range(25):
+        core.force_behavior(target)
+        core.tick()
+    assert target in core._broken, "behavior was never excluded after 20 failures"
+    core.state.queued_behavior = ""
+    seen = set()
+    for _ in range(200):
+        core.tick()
+        seen.add(core.active_behavior_name)
+    assert target not in seen, "excluded behavior was picked again ambiently"
+
+
+def test_animate_action_applies_pose_velocity():
+    """C9 regression: AnimateActions must integrate their pose velocity (Tripping tumbles
+    forward) instead of playing in place. Bouncing is 0-velocity so it stays put."""
+    core = make_core(seed=6)
+    tri = core.actions["Tripping"]
+    while isinstance(tri, ReferenceAction):
+        tri = tri.target
+    core.state.anchor = Vec2(300, H)
+    core.state.dragging = False
+    core.state.looking_right = False
+    core.state.queued_behavior = ""
+    tri.init(ActionCtx(core, None))
+    x0 = core.state.anchor.x
+    for _ in range(60):
+        core.state.time += 1                     # the engine's pre_tick would do this
+        if not tri.step():
+            break
+    assert core.state.anchor.x < x0 - 20, \
+        f"Tripping never moved (x {x0:.0f}->{core.state.anchor.x:.0f})"
+
+
+def test_js_truthy_fails_closed_on_unknown_and_nan():
+    """B6 regression: `_js_truthy` must fail CLOSED on the environment's undefined sentinel
+    and NaN, matching `js_truthy`. It used to return True (TypeError / NaN != 0), so a
+    bare-unknown-identifier condition ran instead of being skipped."""
+    core = make_core()
+    assert core._cond_true("mascot.nonexistent") is False
+    assert core._cond_true("mascot.doesNotExist < 5") is False
+    assert _js_truthy(float("nan")) is False
+
+
+# -- expression-evaluator safety (whitelist; the fail-closed contract) ----------------
+
+def test_evaluator_unknown_identifiers_fail_closed():
+    """Unknown identifiers/members evaluate to undefined (falsy), never raise/execute."""
+    core = make_core()
+    v = ExpressionCompiler("mascot.noSuchThing").eval_value(core.js_view, core.rng)
+    assert is_undefined(v)
+    assert not bool(v)
+    assert ExpressionCompiler("mascot.noSuchThing").eval_bool(core.js_view, core.rng) is False
+
+
+def test_evaluator_math_ternary_and_comparisons():
+    core = make_core()
+    assert ExpressionCompiler("Math.random() >= 0 && Math.random() <= 1").eval_bool(
+        core.js_view, core.rng) is True
+    assert ExpressionCompiler("5 > 3 ? 1 : 0").eval_value(core.js_view, core.rng) == 1
+    assert ExpressionCompiler("3 < 5 && !false").eval_value(core.js_view, core.rng) is True
+
+
+def test_evaluator_malformed_fails_closed():
+    """Malformed expressions raise at compile (fail fast) and never crash at eval time."""
+    from vaultsprite.mascot_environment import parse_error
+
+    with pytest.raises((ValueError, parse_error)):
+        ExpressionCompiler("mascot.anchor.x +")        # trailing operator
+    core = make_core()
+    # division by zero -> NaN, not a crash
+    assert ExpressionCompiler("mascot.anchor.x / 0").eval_value(core.js_view, core.rng) is not None

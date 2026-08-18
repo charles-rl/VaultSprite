@@ -706,15 +706,15 @@ class ExpressionCompiler:
         self.js_body = js_body.strip()
         self._ast = parse_expression(self.js_body) if self.js_body else None
 
-    def eval_value(self, mascot_view, rng=None):
+    def eval_value(self, mascot_view, rng=None, scope: Optional[dict] = None):
         ev = _Evaluator(mascot_view, rng or getattr(_ENV_RNG_HOLDER[0], "_rng", None))
         try:
-            return ev.eval(self._ast, {})
+            return ev.eval(self._ast, scope or {})
         except Exception:
             return _UNDEFINED
 
-    def eval_bool(self, mascot_view, rng=None) -> bool:
-        v = self.eval_value(mascot_view, rng)
+    def eval_bool(self, mascot_view, rng=None, scope: Optional[dict] = None) -> bool:
+        v = self.eval_value(mascot_view, rng, scope)
         return js_truthy(v)
 
 

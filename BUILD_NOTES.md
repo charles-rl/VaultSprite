@@ -7,13 +7,15 @@ while implementing. Read this before touching code — several items here only m
 sense because of PySide6 6.11 build quirks found empirically on this box.
 
 Built: Python 3.13 (uv), Linux dev box, offscreen Qt validation. Target: Windows 11.
-Status at time of writing: **115 tests passing, `--smoke` exit 0, render check PASS.**
-(2026-08-17 P1 hardening pass added vault sandboxing/size-watcher/concurrency + the standalone
-`tests/test_vault_and_ai.py` runner; see §9. The earlier maintenance pass added the two M4
-airborne-clamp tests; the same-day Shijima cross-reference pass added the M9 mascot engine,
-context whole-word matching + decay, off-thread screenshot capture, vault debug trails, and four
-M4 settle-guarantee regression tests — see §9 top entry. The repo now has real commit history:
-`git log`, incl. `34028c3` which bundled the steve_shimeji pack.)
+Status at time of writing: **133 tests passing, `--smoke` exit 0, render check PASS.**
+(2026-08-18 M9 code-review pass fixed 10 verified M9 bugs and added 11 regression tests — see §9
+top entry and `docs/M9_CODE_REVIEW.md`. 2026-08-17 P1 hardening pass added vault
+sandboxing/size-watcher/concurrency + the standalone `tests/test_vault_and_ai.py` runner; see §9.
+The earlier maintenance pass added the two M4 airborne-clamp tests; the same-day Shijima
+cross-reference pass added the M9 mascot engine, context whole-word matching + decay, off-thread
+screenshot capture, vault debug trails, and four M4 settle-guarantee regression tests — see §9 top
+entry. The repo now has real commit history: `git log`, incl. `34028c3` which bundled the
+steve_shimeji pack.)
 
 ---
 
@@ -35,11 +37,16 @@ vaultsprite/
   remote_agent.py         M6: RemoteAgent(QObject) mss capture → openai-in-QThread dispatch
   obsidian_vault.py       M7: ObsidianVault(QObject) — sandboxed atomic dot-temp writes, size watcher
   health_audio.py         M8: SoundBank (pygame no-op fallback) + WorkTimer(QObject)
-  mascot_engine.py        M9: MascotCore — pure-Python Shimeji runtime (parser, behavior
-                          roulette, action runners). NOT yet wired into App/UI (see §3-M9/§4)
+  mascot_engine.py        M9: MascotCore + FACADE (parser, behavior roulette, tick loop) —
+                          the single public import surface. Split 2026-08-18 from one 1489-line
+                          file into mascot_engine + mascot_actions + mascot_data + mascot_vars
+                          + mascot_xml (see §3-M9). Wired into App/UI (see §3-M9/§9)
+  mascot_actions.py       M9: action runners (Stay/Move/Fall/Jump/Sequence/Select/Reference/…)
+  mascot_data.py          M9: Pose/AnimList/MascotState + behavior-pool types
+  mascot_vars.py          M9: ActionVars (${once} / #{per-tick} attribute store)
+  mascot_xml.py           M9: namespace-agnostic XML helpers
   mascot_environment.py   M9: border/area geometry + safe ${}/#{} expression evaluator (no Qt)
-  main.py                 App class = the SINGLE FSM owner; assembles/wires all modules (M1-M8 wired;
-                          M9 pending — see below)
+  main.py                 App class = the SINGLE FSM owner; assembles/wires all modules (M1-M9 wired)
 config/… assets/config.yaml is separate:
 assets/config.yaml        sprite state matrix (dict schema, not Shirros list) — repoint this
                           to swap in real sprites/sheets without touching code
@@ -352,6 +359,13 @@ no-op on Windows (guarded by `os.name != "nt"`).
   play_loop` never raise regardless.
 
 ### M9 mascot_engine + mascot_environment (built 2026-08-17 — **wired into App 2026-08-17**)
+- **Structural split (2026-08-18):** the engine was broken out of one 1489-line `mascot_engine.py`
+  into `mascot_engine.py` (`MascotCore` + **facade**), `mascot_actions.py` (runners),
+  `mascot_data.py` (types), `mascot_vars.py` (`ActionVars`) and `mascot_xml.py` (XML helpers);
+  `mascot_environment.py` is unchanged. `tests/test_mascot_engine.py` and
+  `mascot_engine_widget.py` still import only from `vaultsprite.mascot_engine` (the facade) —
+  keep the facade as the single public import surface. Verified: 133 tests pass, `--smoke` exit 0,
+  `render_check` PASS. See `docs/09_mascot_engine/README.md` §5 for the module map.
 - Pure-Python port of the Shimeji-ee runtime; pattern source-of-truth is **`DalekCraft2/Shimeji-Desktop`**
   (canonical Shimeji-ee, JDK 25, New-BSD/zlib; supersedes the earlier C++/GPL `pixelomer/Shijima-Qt`/
   `libshijima` study). Reference cloned, extracted into `docs/09_mascot_engine/source/`, then deleted
@@ -371,9 +385,11 @@ no-op on Windows (guarded by `os.name != "nt"`).
   family types parse but act as no-op advances.
 - **Wiring (2026-08-17):** `MascotEngine(QObject)` (in `mascot_engine.py`) owns the `QTimer` at
   `mascot.tick_ms: 40` and emits `pose_changed`/`behavior_changed`/`fell_down`/telemetry; `App`
-  creates it, feeds a fresh env snapshot each tick (Qt `availableGeometry()`, cursor dx/dy,
-  tracked window rect ÷ `devicePixelRatio()`), and forces external behaviors (drag → Dragged,
-  flick → Thrown, nudge/stretch/vision-reply → talking) via `core.force_behavior()`. A pixmap
+  creates it and forces external behaviors (drag → Dragged, flick → Thrown, nudge/stretch/vision-
+  reply → talking) via `core.force_behavior()`. The engine feeds its own env snapshot each tick (Qt
+  `availableGeometry()`, cursor dx/dy) and forwards the tracked-window rect from
+  `set_tracked_window(...)` (logical px; the caller divides Win32 px by `devicePixelRatio()`). App
+  does not yet supply a foreground-window rect — see §4/§9 2026-08-18 pass. A pixmap
   cache decodes the single PNG frames this PySide6 build reads reliably; the sprite is mirrored
   by `looking_right`. `debug.telemetry_overlay` drives an on-screen inspector; `debug.vault_logging`
   (default true) writes the telemetry via `append_debug_log` to `Memory/Debug/mascot-<day>.md`.
@@ -415,7 +431,13 @@ no-op on Windows (guarded by `os.name != "nt"`).
    pywinctl polling with a real title source, Shell_TrayWnd (not coded). All guarded; all inert on
    Linux by design. They need a Windows box to exercise — budget real time there. (The settle-logic
    bugs that *could* be faked via monkeypatch are now covered — see §3-M4 P2 tests.)
-7. **No LLM backoff**: repeated unreachable-H100 logs each ask_interval (default 5 min). Cheap fix:
+7. **M9 tracked-window bridge unwired** (2026-08-18): `MascotEngine.set_tracked_window(...)`
+   forwards the rect to `core.update_environment` each tick, but App never supplies one, so
+   `env.active_ie` stays the invisible sentinel and all IE/window-top behavior (IE_STICK landing,
+   `activeIE.*` condition groups, ThrowIE) is dormant. Needs a foreground-window **rect** bridge
+   from App/M5, dividing Win32 px by `devicePixelRatio()`. `ContextDetector` currently exposes only
+   `last_title` (a string), not a rect.
+8. **No LLM backoff**: repeated unreachable-H100 logs each ask_interval (default 5 min). Cheap fix:
    exponential delay or skip-after-N until context changes.
 
 ---
@@ -482,6 +504,51 @@ no-op on Windows (guarded by `os.name != "nt"`).
   `/tmp/vaultsprite_render.png`; no helper scripts or remote-VLM round trips needed for image checks.
 
 ## 9. Changelog
+
+### 2026-08-18 — M9 code-review pass: 10 verified bugs fixed (throw launch, landing latch, climbing, Select block, truthiness, robustness)
+Cross-verified by three independent `@explore` subagents against the `DalekCraft2/Shimeji-Desktop`
+Java reference, then confirmed by live probes (suite 122 → **133**; `--smoke` exit 0). Full findings
++ fix order in `docs/M9_CODE_REVIEW.md`.
+1. **Throw velocity was clobbered every tick** (HIGH): `MascotEngine._tick` refreshed
+   `cursor.dx/dy` from the live QCursor delta *before* `core.tick()` consumed the queued `Thrown`,
+   so `InitialVX="${cursor.dx}"` resolved to ~0 and every flick degraded to a near-zero drop.
+   `inject_throw()` now stages the velocity (`_pending_throw` consume-once flag) and `_tick`
+   uses it for the launch tick instead of the live delta.
+2. **Select `${...}` branch conditions latched forever** (HIGH): `SelectAction._cond_vars[i]`
+   cached `ActionVars` (whose `${...}` is a `_DynOnce`) on the *shared* parsed instance, so the
+   Fall/Thrown landing branch was locked to the first run's choice (probe: wall-fall then a floor
+   fall wrongly kept GrabWall, no Bouncing). `SelectAction.init` now rebuilds `_cond_vars` per run.
+3. **Bare action-attr identifiers were dead in conditions** (HIGH): `<Animation Condition="#{TargetY
+   < mascot.anchor.y}">` (ClimbWall) evaluated with an empty scope → `TargetY`→undefined→False → no
+   effective animation → wall climbs never moved. Added `ActionVars.as_scope()` +
+   `ExpressionCompiler.eval_value(..., scope=...)` and injected the action's vars into
+   `_current_anim`. ClimbAlongWall/ClimbIEWall/… now climb.
+4. **No-match Select blocked its parent Sequence forever** (HIGH): `SelectAction.step` returned
+   `True` when no branch matched, freezing ChaseMouse (zero rendered frames) when no window was
+   tracked. It now ends (Java `ComplexAction.hasNext`), so the sequence advances.
+5. **`_js_truthy` failed OPEN** (MED): the env `_UNDEFINED` sentinel (no `__len__` → TypeError →
+   True) and NaN (`!= 0` → True) made unknown behavior conditions *run* instead of degrade. Now
+   fail-closed (checks `is_undefined` + NaN), matching `js_truthy`.
+6. **Unknown forced behavior wedged the engine** (MED): `_pick_behavior` raised `KeyError` and the
+   queue stayed set forever. It now logs and falls through to the ambient roulette.
+7. **`_init_count` guard was dead code** (MED): the ladder reset it every tick, so a permanently
+   broken behavior was re-picked forever. Now tracked **per behavior** (`_init_fail` dict) and, after
+   20 consecutive failures, the behavior is added to a sticky `_broken` set and excluded from the
+   ambient roulette (`keep`/`_ref_ok`).
+8. **Reveal restores the window top-left, not the feet** (MED): `_hide_walk_done` synced the anchor
+   from `_hide_restore` (window pos) but `sync_anchor` expects feet → visible snap on every show.
+   `_begin_hide` now stores `_hide_anchor = mascot.anchor()` and reveal restores it.
+9. **AnimateActions ignored pose velocity** (LOW-MED): `Tripping` poses carry `-8/-4/-2` px but
+   never moved the anchor (stumbled in place). `AnimateAction.step` now applies pose velocity
+   (Bouncing is 0-velocity so the landing splash stays put).
+10. **`set_tracked_window` was unwired** (MED feature): no caller fed the foreground rect, so all
+    IE/window-top logic was inert. Now `MascotEngine._tick` forwards `self._tracked_window` to
+    `core.update_environment` each tick. Feeding it from App/M5 still needs a foreground-window
+    rect bridge (÷`devicePixelRatio()`) — Windows-only, not wired (see §4).
+11. **Tests**: +11 targeted regressions — Select-latch, ClimbWall-with-TargetY, no-match-Select
+    advances, unknown-forced fallback, broken-behavior exclusion, Animate pose-velocity, truthiness
+    fail-closed, an expression-evaluator safety suite (no `eval`, unknown→False, NaN, ternary,
+    `Math.random`, malformed fail-closed), and the widget throw-velocity path. Nothing pruned.
 
 ### 2026-08-17 — Feedback pass: landing loop, pendulum sway, mirror, hide-walk, alignment
 1. **Landing no longer sticks on shime18 (the main bug).** Two engine bugs: (a) `Animate`
