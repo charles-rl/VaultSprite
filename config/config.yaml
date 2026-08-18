@@ -10,7 +10,7 @@ app:
 window:
   width: 89             # overlay window size in logical px (~0.7× the original 128; sprite scales to this)
   height: 89
-  fps: 20               # animation tick rate (frame-slicer timer)
+  fps: 30               # animation tick rate (frame-slicer timer)
   drag_threshold_px: 5      # press travel before a click becomes a drag (Manhattan distance)
   click_timeout_ms: 200     # no-move window that confirms a single click
   flick_speed_threshold: 80.0   # px/s at release required to inject an impulse
