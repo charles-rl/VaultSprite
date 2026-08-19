@@ -212,8 +212,9 @@ def test_injected_throw_survives_tick_refresh(qapp):
 def test_mascot_engine_clamps_off_screen_targets(qapp):
     """M9 feedback: a throw/run toward an off-screen target must never leave the monitor.
     ``_clamp_pos`` now pins the ANCHOR (feet) to the work-area borders so the pet reaches the
-    ceiling and side walls to grip them (no on-screen margin), while a Dash toward
-    ``cursor.x``/a big ``Math.random`` TargetX can no longer walk the whole pet off-screen."""
+    side walls (body overhangs by half its size) and up to the top edge — always drawn UPRIGHT
+    — while a Dash toward ``cursor.x``/a big ``Math.random`` TargetX can no longer walk the
+    whole pet off-screen."""
     from PySide6.QtWidgets import QApplication
     from vaultsprite.mascot_engine_widget import MascotEngine
     from tests.conftest import FakeConfig
@@ -227,18 +228,11 @@ def test_mascot_engine_clamps_off_screen_targets(qapp):
     assert x + px // 2 == geo.right()          # feet pinned to the right wall
     assert y + px == geo.bottom()              # feet pinned to the floor
 
-    # far past the left / top while STANDING → feet clamp onto the borders; the sprite may
-    # overhang the side by half its size so it can grip, but never leaves the area entirely
+    # far past the left / top → the sprite stays upright and on-screen: it reaches up so its
+    # top touches the screen top (y == geo.top) and overhangs the left side by half its size
     x, y = eng._clamp_pos(geo.left() - 9999, geo.top() - 9999)
     assert x + px // 2 == geo.left()           # feet pinned to the left wall
-    assert y + px == geo.top()                 # standing just below the ceiling
-
-    # gripping the ceiling: the body hangs BELOW the feet (upside down), so the window starts
-    # at the anchor — fully visible, not "vanished above the ceiling"
-    eng._on_ceiling = True
-    x, y = eng._clamp_pos(geo.right() + 9999, geo.top() - 9999)
-    assert x + px // 2 == geo.right()
-    assert y == geo.top()                      # window top == anchor → body visible below
+    assert y == geo.top()                      # sprite top at the screen top (still visible)
 
 
 def test_mascot_interpolation_smooths_window_moves(qapp):

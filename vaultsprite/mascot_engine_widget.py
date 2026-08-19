@@ -107,9 +107,6 @@ class MascotEngine(QObject):
         self._interp_timer.setInterval(max(5, self.tick_ms // 4))
         self._interp_timer.timeout.connect(self._interp_step)
         self._debug_counter = 0
-        # the grip surface for the current tick: True = anchor is on the ceiling, so the
-        # sprite is rendered upside-down hanging below the feet (see _clamp_pos/_on_frame).
-        self._on_ceiling = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(self.tick_ms)
@@ -330,16 +327,13 @@ class MascotEngine(QObject):
             self._cursor = (cx, cy)
             self.core.update_environment(cursor_pos=(cx, cy, dx, dy),
                                          tracked_window=self._tracked_window)
-            # grip surface for THIS tick's rendering (upside-down ceiling flip): read the
-            # anchor before the tick so _on_frame flips the frame as it is drawn.
-            self._on_ceiling = self._anchor_on_ceiling()
             self.core.tick()
             # move the window to follow the core anchor (unless the user is dragging it
             # or App is walking the pet off-screen during hide/show). The anchor is clamped
-            # to the work-area borders so the pet actually grips the ceiling and side walls
-            # (no on-screen margin) while never running off-screen — a Dash toward an
-            # off-screen cursor.x or a huge Math.random TargetX still can't escape; the
-            # interpolator then smooths the move between engine ticks.
+            # to the work-area borders so the pet grips the side walls and reaches up to the
+            # top edge (sprite stays upright and on-screen) while never running off-screen —
+            # a Dash toward an off-screen cursor.x or a huge Math.random TargetX still can't
+            # escape; the interpolator then smooths the move between engine ticks.
             if not self._dragging and not self._hide_walking:
                 st = self.core.state
                 x, y = self._clamp_pos(int(st.anchor.x), int(st.anchor.y))
@@ -351,30 +345,22 @@ class MascotEngine(QObject):
             logger.warning("mascot tick skipped: %s", exc)
 
     # -- motion helpers --------------------------------------------------------
-    def _anchor_on_ceiling(self) -> bool:
-        """True when the core anchor (feet) is on the ceiling, so the sprite hangs
-        upside-down below it instead of standing above it."""
-        if self.core is None:
-            return False
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return False
-        return self.core.state.anchor.y <= screen.availableGeometry().top() + 1
-
     def _clamp_pos(self, ax: int, ay: int) -> tuple[int, int]:
         """Clamp the ANCHOR (feet) to the work-area borders and derive the window's
-        top-left. Keeping the anchor on the borders lets the pet grip the ceiling and
-        side walls (no visible margin), while the border clamp still stops off-screen
-        runaway — a Dash/Throw target outside the work area pins the feet on the edge
-        instead of pushing the whole window off the monitor. Returns (x, y) window pos."""
+        top-left. The sprite is always drawn UPRIGHT (no upside-down ceiling flip): the
+        feet reach the side walls (body overhangs by half its size) and up to the top edge
+        (head touches the screen top), but the clamp keeps it on-screen so a Dash/Throw
+        target outside the work area pins the feet on the edge instead of pushing the
+        whole window off the monitor. Returns (x, y) window pos."""
         screen = QApplication.primaryScreen()
         if screen is not None:
             geo = screen.availableGeometry()
+            px = self._px
             ax = max(geo.left(), min(ax, geo.right()))
-            ay = max(geo.top(), min(ay, geo.bottom()))
-        px = self._px
-        if self._on_ceiling:
-            return ax - px // 2, ay          # body hangs BELOW the feet (upside down)
+            # keep the upright sprite's top (ay - px) at/above the screen top
+            ay = max(geo.top() + px, min(ay, geo.bottom()))
+        else:
+            px = self._px
         return ax - px // 2, ay - px         # body rises ABOVE the feet
 
     def _set_target(self, x: int, y: int):
@@ -438,11 +424,6 @@ class MascotEngine(QObject):
         # and vice-versa, which made the walk look flipped.
         if self.core.state.looking_right:
             pm = pm.transformed(QTransform().scale(-1, 1))
-        # Gripping the ceiling: the anchor (feet) is at the top and the body hangs below, so
-        # flip vertically too. The anchor is the bottom-center of the standing image; after a
-        # vertical flip it's the top-center, which is where the feet grip the ceiling.
-        if getattr(self, "_on_ceiling", False):
-            pm = pm.transformed(QTransform().scale(1, -1))
         pm = pm.scaled(self._px, self._px, Qt.AspectRatioMode.KeepAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)
         self._rendered_frame = True
