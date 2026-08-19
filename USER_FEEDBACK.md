@@ -1,18 +1,23 @@
-# User feedback — resolved 2026-08-18 (latest pass)
+# User feedback — code-review pass 2026-08-19 (latest)
 
-| Note | Resolution |
+Review of non-M9 modules vs reference repos (koishi gravity.py, obsidian-memory-for-ai SPEC-v4). Fixed:
+
+| Area | Fix |
 |---|---|
-| Wall/ceiling margin too big; can't grip sides/ceiling | `_clamp_pos` pins the anchor (feet) to the work-area borders — sprite grips both walls and reaches up to the top edge, drawn upright (`mascot_engine_widget.py`). No upside-down ceiling flip. |
-| Drag release: frames snap back to grab point before landing | `set_dragging(False)` resets `_pos_cur`, so the throw launches in place from the drop point (no lerp back to the grab). |
-| Sway likes speed but oscillates forever | Lock dead-zone in `_DraggableAction.step`: sways while dragging, snaps to the cursor when held still. |
-| Scale change: breed/split animation loops forever + slow | Breed gag is now `Animate` (plays once, no loop) instead of `Stay`; gag pose durations shortened. |
+| M7 events tz | `_now_iso()` now honors `obsidian.date_timezone`; `occurred_at` day always matches its bucket dir (was hardcoded UTC). |
+| M7 event uniqueness | append-only event filenames get a per-instance seq suffix — same-slug/same-second events no longer clobber. |
+| M4 standee grounding | grounded check now requires feet-x-overlap with the standing window; a pet walked off its window re-arms a real fall (was x-blind hover). |
+| M4 stale `_vx` | landing zeroes `_vx` (matches koishi `gravity.py`), so a later fall can't side-launch with residual flick velocity. |
 
-Housekeeping: **139 tests pass**, `--smoke` exit 0, `tools/render_check.py` PASS.
+4 regression tests added. **141 tests pass**, `--smoke` exit 0, `tools/render_check.py` PASS.
+
+# Previous pass (2026-08-18)
+Wall-grip, drag-release throw, sway dead-zone, breed gag → Animate. **139 tests pass.**
 
 # Previous pass (2026-08-18, commit `48e7549`)
-On-screen clamp, throw smoothing, scale respawn flourish, throttled mascot telemetry, "Configuring VaultSprite" README section. **137 tests pass.**
+On-screen clamp, throw smoothing, scale respawn, throttled mascot telemetry, README section. **137 tests pass.**
 
 # Previous pass (2026-08-17, commit `e1878ff`)
-Bubble/telemetry alignment, pendulum swing-back, throw returns + no landing loop, hide uses walk animation, walk mirror fix, one-cycle Animate/Select, wall-grip for climbs. **122 tests pass.**
+Bubble/telemetry alignment, pendulum swing-back, throw returns + no landing loop, hide walk animation, walk mirror fix, one-cycle Animate/Select, wall-grip climbs. **122 tests pass.**
 
-Not changed this pass: the scale control still multiplies (re-selecting a size replays the now-quick flourish); pendulum gain/damp left at 0.1/0.8.
+Not changed: scale control still multiplies (re-select replays the flourish); M4 occlusion/window-filter enumeration and M1 legacy drop-freeze documented but deferred.

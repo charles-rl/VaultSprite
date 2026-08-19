@@ -86,6 +86,10 @@ class ObsidianVault(QObject):
         self._size_warned_over = False
         # single writer lock across read-modify-write sections (P1 concurrency fix)
         self._lock = threading.RLock()
+        # per-instance monotonic counter → append-only event filenames are unique even
+        # for same-slug/same-second events (a bare HHMMSS stamp collided and the second
+        # write silently overwrote the first)
+        self._event_seq = 0
 
     # -- write sandboxing guard (P1: absolute write prohibition outside root) ----
     def _resolve_safe(self, file_path: Union[str, Path]) -> Path:
@@ -172,7 +176,7 @@ class ObsidianVault(QObject):
         return now.date().isoformat()
 
     def _now_iso(self) -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return datetime.now(self._tz).isoformat(timespec="seconds")
 
     # -- public API (all writes: locked → guarded → atomic → size-checked) ----
     def write_fact(self, category: str, key: str, value: Any, **meta: Any) -> Path:
@@ -224,8 +228,10 @@ class ObsidianVault(QObject):
         with self._lock:
             day = self._today()
             slug = _slugify(summary)[:24]
-            stamp = datetime.now(timezone.utc).strftime("%H%M%S")
-            path = self.events_dir / day / f"event-{day}-{slug}-{stamp}.md"
+            stamp = datetime.now(self._tz).strftime("%H%M%S")
+            seq = self._event_seq
+            self._event_seq += 1
+            path = self.events_dir / day / f"event-{day}-{slug}-{stamp}-{seq}.md"
             target = self._resolve_safe(path)         # may raise PermissionError
             body = details.pop("body", None) or summary
             frontmatter: dict[str, Any] = {

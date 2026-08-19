@@ -262,7 +262,8 @@ class TerrainPhysics(QObject):
                 if top_y >= old_bottom - 1:
                     effective_bottom = min(effective_bottom, top_y)
                     self._standee = {"top": top_y, "hwnd": meta["hwnd"],
-                                     "title": meta.get("title", "")}
+                                     "title": meta.get("title", ""),
+                                     "left": meta.get("left"), "right": meta.get("right")}
 
         at_bottom = new_y + h >= effective_bottom
         if at_bottom:
@@ -270,8 +271,8 @@ class TerrainPhysics(QObject):
             self._move_to(int(new_x), landed_y)
             self._falling = False
             self._vy = 0.0
+            self._vx = 0.0          # zeroed so a later fall can't side-launch (ref gravity.py)
             self._fall_announced = False
-            # horizontal drift keeps the pet walking a little after touchdown
             self.landed.emit(int(new_x), landed_y)
         else:
             self._move_to(int(new_x), int(new_y))
@@ -287,7 +288,8 @@ class TerrainPhysics(QObject):
             top = win["top"]
             if old_bottom <= top <= new_bottom and not (feet_l >= win["right"] or feet_r <= win["left"]):
                 if best is None or top < best[0]:
-                    best = (top, {"hwnd": win["hwnd"], "title": win.get("title", "")})
+                    best = (top, {"hwnd": win["hwnd"], "title": win.get("title", ""),
+                                  "left": win["left"], "right": win["right"]})
         return best
 
     def _check_standee_alive(self) -> bool:
@@ -315,9 +317,17 @@ class TerrainPhysics(QObject):
             return True
         if not self._stand_on_windows:
             return False
-        standee_top = (self._standee or {}).get("top")
+        standee = self._standee or {}
+        standee_top = standee.get("top")
         if standee_top is not None and abs(bottom - standee_top) <= tol:
-            return True                           # still sitting on the window we landed on
+            w, _h = (self._pet_size() or (96, 96))[:2]
+            cx = x + w // 2
+            sleft, sright = standee.get("left"), standee.get("right")
+            # x-blind until a window's span is recorded; once known, require the
+            # feet to still overlap it so a pet walked off its window re-arms a
+            # real fall instead of hovering at window height (ref re-validation).
+            if sleft is None or sright is None or sleft <= cx <= sright:
+                return True                       # still sitting on the window we landed on
         w, _h = (self._pet_size() or (96, 96))[:2]
         cx = x + w // 2
         for win in self._get_visible_windows():

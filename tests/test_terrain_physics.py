@@ -214,6 +214,74 @@ def test_perched_on_window_stays_grounded(world, monkeypatch):
     assert (vp.x, vp.y) == pos0, "perched pet must not drift or drop"
 
 
+def test_walked_off_window_rearms_fall(world, monkeypatch):
+    """B1 regression: a pet that walks off the window it landed on must re-arm a
+    real fall (and settle on the floor) instead of hovering at window height."""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    win_x, win_y = int(geo.left()) + 100, int(geo.top()) + 250
+    win_w = 300
+    monkeypatch.setattr(phys, "_get_visible_windows",
+                        lambda: [_fake_window(win_x, win_y, w=win_w)])
+    phys._stand_on_windows = True
+
+    # land ON the window top, center within its span
+    vp.x = win_x + win_w // 2
+    vp.y = win_y - vp.h
+    phys._standee = {"top": win_y, "hwnd": 1234, "title": "Fake",
+                     "left": win_x, "right": win_x + win_w}
+    falls: list[int] = []
+    phys.falling_started.connect(lambda: falls.append(1))
+    for _ in range(5):
+        phys._tick()
+    assert not phys.falling and falls == [], "perched in-span pet must stay grounded"
+
+    # walk off the right edge → feet center leaves the window span
+    vp.x = win_x + win_w + 100
+    landed: list[tuple[int, int]] = []
+    phys.landed.connect(lambda x, y: landed.append((x, y)))
+    ticks = 0
+    while not phys.falling and ticks < 20:
+        phys._tick()
+        ticks += 1
+    assert phys.falling, "pet walked off its window but never re-armed a fall"
+
+    ticks = 0
+    while phys.falling and ticks < 600:
+        phys._tick()
+        ticks += 1
+    assert landed, "pet never settled after walking off its window"
+    assert abs((landed[-1][1] + vp.h) - _floor()) <= 2, "must settle onto the work-area floor"
+
+
+def test_landing_zeroes_horizontal_velocity(world, monkeypatch):
+    """B2 regression: a landing must zero _vx so a later fall (e.g. standee loss)
+    doesn't side-launch the pet with the stale residual flick velocity."""
+    phys, vp = world
+    geo = QApplication.primaryScreen().availableGeometry()
+    monkeypatch.setattr(phys, "_get_visible_windows", lambda: [])
+    phys._stand_on_windows = True
+
+    vp.x, vp.y = int(geo.left()) + 200, int(geo.top()) + 50
+    phys.apply_impulse(vx_px_s=2000.0, vy_px_s=-100.0)   # strong horizontal flick
+    assert phys._vx != 0.0 and phys.falling
+
+    ticks = 0
+    while phys.falling and ticks < 600:
+        phys._tick()
+        ticks += 1
+    assert not phys.falling, "pet never landed"
+    assert phys._vx == 0.0, f"landing must zero _vx, got {phys._vx}"
+
+    # force a fall from the same grounded spot (standee loss path) — no horizontal kick
+    phys._falling = True
+    phys._in_flick = False
+    x0 = vp.x
+    for _ in range(3):
+        phys._tick()
+    assert abs(vp.x - x0) <= 1, f"fall after landing must not side-launch: x {x0} -> {vp.x}"
+
+
 def test_standee_loss_starts_a_real_fall_and_settles(world, monkeypatch):
     """Regression: the standee liveness probe once read .get('rect') instead of 'hwnd',
     and on loss it only emitted falling_started without setting _falling — so the pet

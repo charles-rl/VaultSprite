@@ -65,6 +65,58 @@ def test_read_missing_returns_empty(vault):
     assert fm == {} and body == ""
 
 
+def test_record_event_local_tz_matches_bucket_day(qapp, tmp_path):
+    """Regression: under date_timezone=local, occurred_at must share the local
+    day of the bucket dir — never a hardcoded-UTC stamp that contradicts it."""
+    from unittest.mock import patch
+    from datetime import datetime, timezone, timedelta
+
+    cfg = FakeConfig({"obsidian.vault_root": str(tmp_path / "TzVault"),
+                      "obsidian.date_timezone": "local"})
+    v = ObsidianVault(cfg)
+    assert v._tz is None, "local tz must yield a naive local clock"
+
+    # Near-midnight local time when UTC is already the next day: local date 2026-01-01,
+    # UTC date 2026-01-02. The event must land in the local-day bucket AND stamp it.
+    local_now = datetime(2026, 1, 1, 23, 59, 59)
+    utc_now = local_now + timedelta(hours=8)   # UTC +8h → 2026-01-02
+    with patch("vaultsprite.obsidian_vault.datetime") as dtm:
+        dtm.now.side_effect = lambda tz: utc_now if tz is timezone.utc else local_now
+        dtm.now.return_value = local_now
+        dtm.now.isoformat = datetime.isoformat
+        path = v.record_event("tz boundary event")
+
+    day = path.parent.name
+    assert day == "2026-01-01", f"bucket must use local day, got {day}"
+    fm, _ = ObsidianVault._read_markdown(path)
+    assert fm["occurred_at"].startswith("2026-01-01"), \
+        f"occurred_at must share the local bucket day, got {fm['occurred_at']}"
+
+
+def test_same_second_events_do_not_clobber(qapp, tmp_path):
+    """Regression: two events with the same summary within one second must produce
+    distinct files — the second must not silently overwrite the first (append-only)."""
+    from unittest.mock import patch
+    from datetime import datetime, timezone
+
+    cfg = FakeConfig({"obsidian.vault_root": str(tmp_path / "UniqueVault")})
+    v = ObsidianVault(cfg)
+    fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("vaultsprite.obsidian_vault.datetime") as dtm:
+        dtm.now.return_value = fixed
+        dtm.now.isoformat = datetime.isoformat
+        dtm.now.strftime = staticmethod(lambda fmt: fixed.strftime(fmt))
+        dtm.utcnow.return_value = fixed
+        p1 = v.record_event("identical summary")
+        p2 = v.record_event("identical summary")
+
+    assert p1 != p2, "same-second same-slug events must not share a path"
+    assert p1.exists() and p2.exists(), "both events must be written (no overwrite)"
+    fm1, _ = ObsidianVault._read_markdown(p1)
+    fm2, _ = ObsidianVault._read_markdown(p2)
+    assert fm1["summary"] == fm2["summary"] == "identical summary"
+
+
 def test_record_event_under_date_bucket(vault):
     path = vault.record_event("context switched to WORK", source="test")
     assert re.match(r"^event-\d{4}-\d{2}-\d{2}", path.stem)

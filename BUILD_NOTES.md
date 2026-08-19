@@ -505,6 +505,28 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ## 9. Changelog
 
+### 2026-08-19 — Non-M9 code-review pass: M4/M7 bug fixes (141 tests)
+Code-reviewed the non-M9 modules against the reference repos (koishi `gravity.py` for M4,
+`obsidian-memory-for-ai` SPEC-v4 for M7). Four real bugs fixed:
+1. **M7 events tz** (`obsidian_vault.py`): `_now_iso()` hardcoded UTC while `_today()` honored
+   `date_timezone` → with `local` an event landed in a day dir that contradicted its own
+   `occurred_at`. Now `_now_iso()` uses the existing `_tz` helper; day bucket and timestamp always agree.
+2. **M7 event overwrite** (`obsidian_vault.py`): filename uniqueness was `%H%M%S` only, so two
+   same-slug events in one second silently overwrote (violates append-only). Added a per-instance
+   `_event_seq` suffix — robust regardless of clock resolution (the %f microsecond variant still
+   collided under a frozen clock, so a counter is used).
+3. **M4 standee x-blind grounding** (`terrain_physics.py`): `_on_any_surface()`'s standee fast-path
+   returned grounded on y-magnitude alone; a pet walked off its window hovered at window height
+   forever (ref `gravity.py:176-181` re-validates feet-overlap). The standee dict now records
+   `left`/`right` (from `_window_landing`) and the fast-path requires feet-center-x overlap.
+4. **M4 stale `_vx` after landing** (`terrain_physics.py`): landing zeroed `_vy` but not `_vx`
+   (friction only runs while falling), so a later fall (standee loss / re-arm) side-launched with
+   the residual flick velocity. Landing now zeroes `_vx` (matches `gravity.py:332-334`).
+
+Deferred (documented only): M4 occlusion detection + window-enumeration filters (IsIconic/cloaked/
+toolwindow); flick downward-leg vy cap 8 vs koishi 25 (minor, gentler landings); M1 legacy-mode
+drop-to-floor sprite freeze (dead `resume_after_drag()`). 4 regression tests added.
+
 ### 2026-08-18 — Feedback pass: on-screen clamp, throw smoothing, scale respawn, richer logs (137 tests)
 Addresses the "Recent User Feedback" block in `USER_FEEDBACK.md` (fling off-screen, ceiling vanish,
 scale-change glitch, throw jitter, config docs). Sway tuning was deliberately left to the user
