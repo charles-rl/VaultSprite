@@ -164,6 +164,48 @@ def test_excluded_behaviors_never_ambient():
     assert "SitDown" not in seen and "LieDown" not in seen
 
 
+def test_descent_and_idle_paths_ambient_selectable():
+    """Regression: with the ceiling's exits marked Hidden, the only ambient candidate on
+    the top border was ClimbAlongCeiling and the single-candidate shortcut looped it
+    forever — the pet spent its whole life crawling the ceiling. The descent/idle paths
+    must be visible again so every surface has a way off (and the floor isn't a trap)."""
+    core = make_core()
+    for name in ("FallFromCeiling", "ClimbHalfwayAlongWall", "StandUp"):
+        assert not core.behavior_defs[name].node.hidden, \
+            f"{name} is hidden — the pet can never leave/avoid the surface it climbs onto"
+
+
+def test_ceiling_pick_distribution_includes_fall():
+    """Statistical guard: repeatedly rolling the ceiling roulette must sometimes pick a
+    fall (never a fixed 100% climb like before)."""
+    core = make_core(seed=7)
+    core.state.anchor = Vec2(W // 2, 0)
+    falls = total = 0
+    for _ in range(400):
+        node = core._pick_behavior(None)
+        if node.name == "ClimbAlongCeiling":
+            continue
+        total += 1
+        if node.name == "FallFromCeiling":
+            falls += 1
+    assert total and falls, "ceiling roulette never once fell — back to the absorbing state"
+
+
+def test_forced_fall_from_ceiling_reaches_floor():
+    """Regression: forcing the ceiling's descent behavior (Offset Y=1 + Stand) must take
+    the pet from the top border all the way down to the floor."""
+    core = make_core()
+    core.state.anchor = Vec2(W // 2, 0)                     # start on the top border
+    core.force_behavior("FallFromCeiling")
+    landed = False
+    for _ in range(500):
+        core.tick()
+        if core.state.anchor.y >= H - 2:
+            landed = True
+            break
+    assert landed, f"pet never got off the ceiling to the floor: y={core.state.anchor.y}"
+
+
 def test_throw_ie_action_builds_not_dropped():
     """ThrowIe (Embedded ThrowIE) must parse to a StayAction, not vanish."""
     core = make_core()

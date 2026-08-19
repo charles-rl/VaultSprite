@@ -1,23 +1,16 @@
-# User feedback — code-review pass 2026-08-19 (latest)
+# User feedback — ceiling-stuck fix 2026-08-19 (latest pass)
 
-Review of non-M9 modules vs reference repos (koishi gravity.py, obsidian-memory-for-ai SPEC-v4). Fixed:
-
-| Area | Fix |
+| Note | Resolution |
 |---|---|
-| M7 events tz | `_now_iso()` now honors `obsidian.date_timezone`; `occurred_at` day always matches its bucket dir (was hardcoded UTC). |
-| M7 event uniqueness | append-only event filenames get a per-instance seq suffix — same-slug/same-second events no longer clobber. |
-| M4 standee grounding | grounded check now requires feet-x-overlap with the standing window; a pet walked off its window re-arms a real fall (was x-blind hover). |
-| M4 stale `_vx` | landing zeroes `_vx` (matches koishi `gravity.py`), so a later fall can't side-launch with residual flick velocity. |
+| Pet always climbs around the ceiling; never comes down | Solo-pet static geometry makes Shimeji's "On Ceiling" pool a one-way ratchet (`ClimbAlongCeiling` was the only non-hidden candidate → deterministic single-candidate loop). Unhid `FallFromCeiling`, `HoldOntoWall`, `FallFromWall`, `StandUp` in `steve_shimeji/conf/behaviors.xml`: ceiling now re-rolls climb/fall (verified ~58% climb / 42% fall), floor idles instead of always running to a wall. |
 
-4 regression tests added. **141 tests pass**, `--smoke` exit 0, `tools/render_check.py` PASS.
+Window landing: **works only in legacy GIF mode** (`mascot.enabled: false`) — the M9 engine's `set_tracked_window` is never fed by any caller, so it models work-area edges only (documented in BUILD_NOTES). Not changed.
 
-# Previous pass (2026-08-18)
-Wall-grip, drag-release throw, sway dead-zone, breed gag → Animate. **139 tests pass.**
+Housekeeping: **144 tests pass**, `--smoke` exit 0; +3 M9 regression tests (descent paths visible, ceiling pick distribution, forced-fall reaches floor).
 
-# Previous pass (2026-08-18, commit `48e7549`)
-On-screen clamp, throw smoothing, scale respawn, throttled mascot telemetry, README section. **137 tests pass.**
+# Previous passes
+- 2026-08-19 — non-M9 review: M7 event tz/uniqueness, M4 standee x-overlap / stale `_vx` fixes. **141 tests.**
+- 2026-08-18 — on-screen clamp, throw smoothing, scale respawn, richer logs (137). M9 wall/ceiling grip, drag-release snap-back, sway settle, breed gag (from `e1878ff`→`a414896`, 122→139).
+- 2026-08-17 — landing loop, pendulum swing-back, hide-walk, alignment, wall-grip climbs. **122 tests.**
 
-# Previous pass (2026-08-17, commit `e1878ff`)
-Bubble/telemetry alignment, pendulum swing-back, throw returns + no landing loop, hide walk animation, walk mirror fix, one-cycle Animate/Select, wall-grip climbs. **122 tests pass.**
-
-Not changed: scale control still multiplies (re-select replays the flourish); M4 occlusion/window-filter enumeration and M1 legacy drop-freeze documented but deferred.
+Not changed: M9 real-window landing and cursor-proximity reaction remain off (optional features); scale control still multiplies.

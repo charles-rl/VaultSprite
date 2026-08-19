@@ -39,7 +39,7 @@
 
 		<!-- On the Floor -->
 		<Condition Condition="#{mascot.environment.floor.isOn(mascot.anchor) || mascot.environment.activeIE.topBorder.isOn(mascot.anchor)}">
-			<Behavior Name="StandUp" Frequency="200" Hidden="true" />
+			<Behavior Name="StandUp" Frequency="200" />
 			<Behavior Name="SitDown" Frequency="200">
 				<NextBehavior Add="true">
 					<BehaviorReference Name="SitWhileDanglingLegs" Frequency="100" />
@@ -65,13 +65,13 @@
 					mascot.environment.workArea.leftBorder.isOn(mascot.anchor) || 
 					mascot.environment.activeIE.rightBorder.isOn(mascot.anchor) ) }">
 			<Behavior Name="HoldOntoWall" Frequency="100" Hidden="true" />
-			<Behavior Name="FallFromWall" Frequency="50" Condition="${!mascot.environment.floor.isOn(mascot.anchor)}" Hidden="true" />
+			<Behavior Name="FallFromWall" Frequency="50" Condition="${!mascot.environment.floor.isOn(mascot.anchor)}" />
 		</Condition>
 		
 		<!-- On the Ceiling -->
 		<Condition Condition="#{mascot.environment.ceiling.isOn(mascot.anchor) || mascot.environment.activeIE.bottomBorder.isOn(mascot.anchor)}">
 			<Behavior Name="HoldOntoCeiling" Frequency="100" Hidden="true" />
-			<Behavior Name="FallFromCeiling" Frequency="50" Hidden="true" />
+			<Behavior Name="FallFromCeiling" Frequency="50" />
 		</Condition>
 		
 		<!-- On Work Area Floor -->
@@ -101,7 +101,7 @@
 		<!-- On Work Area Facing the Wall -->
 		<Condition Condition="#{mascot.lookRight ? mascot.environment.workArea.rightBorder.isOn(mascot.anchor) :
 					mascot.environment.workArea.leftBorder.isOn(mascot.anchor)}">
-			<Behavior Name="ClimbHalfwayAlongWall" Frequency="100" Hidden="true" />
+			<Behavior Name="ClimbHalfwayAlongWall" Frequency="100" />
 			<Behavior Name="ClimbAlongWall" Frequency="100" />
 		</Condition>
 		

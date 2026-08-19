@@ -505,6 +505,27 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ## 9. Changelog
 
+### 2026-08-19 — M9 behavior rebalance: ceiling no longer absorbing (144 tests)
+User report: "the pet always climbs around the ceiling / spends most of its time there."
+Root cause is the same static-environment ratchet flagged in §3-M9: with `active_ie` permanently
+invisible, the on-ceiling pool's only non-hidden candidate was `ClimbAlongCeiling`, and the
+single-candidate shortcut (mascot_engine.py `_pick_behavior`) loops it forever — no gravity
+reset, ceiling even counts as a landing surface. The reference (DalekCraft2) ships these exits
+Hidden too (its default pack), so stock behaves the same; this is *intentional* data tuning for
+our solo pet, not an engine bug:
+1. **Unhide `FallFromCeiling`** (`steve_shimeji/conf/behaviors.xml`) — ceiling re-roll becomes a
+   real coin (verified ~58% climb / 42% fall); the action is offset Y+1 + Stand → LostGround →
+   ForceFall to floor.
+2. **Unhide `HoldOntoWall` + `FallFromWall`** — wall is no longer deterministic ceiling-bound; it
+   can hold, and drop back down.
+3. **Unhide `StandUp` (freq 200)** on the floor — restores stock-style idle weight so the floor is
+   an actual resting state instead of ~65% "grab a wall" bias (only SitDown was visible before).
+
+No engine change; pure pack data + 3 regression tests. **Window landing remains legacy-mode only**
+(`mascot.enabled: false`): `TerrainPhysics._get_visible_windows` is the real-window path and M9's
+`set_tracked_window()` has no caller — documented, not a bug. Cursor-proximity reaction intentionally
+absent (stock Shimeji reacts to drag/throw + the Follow-Cursor tray command only).
+
 ### 2026-08-19 — Non-M9 code-review pass: M4/M7 bug fixes (141 tests)
 Code-reviewed the non-M9 modules against the reference repos (koishi `gravity.py` for M4,
 `obsidian-memory-for-ai` SPEC-v4 for M7). Four real bugs fixed:
