@@ -197,9 +197,33 @@ UI layer. `App` stays the sole owner of *external* animation-force decisions.
    parser normalizes them at the XML boundary (`mascot_xml.py` `_TAG_ALIAS`/`_ATTR_ALIAS`/
    `_VALUE_ALIASES`) and registers a handful of canonical English name aliases so the App's forced
    behaviors (Fall/Dragged/Thrown/SitDown/…) still resolve on localized packs (see dieter).
-6. **Testing**: `tests/test_mascot_engine.py` drives `core.tick()` directly — parse the Steve pack,
-   assert a Fall from empty air, assert the recovery ladder resets a wedged action, assert Breed
-   stays a no-op, and assert the visual-gag behavior plays frames 38–46 without spawning.
+ 6. **Testing**: `tests/test_mascot_engine.py` drives `core.tick()` directly — parse the Steve pack,
+    assert a Fall from empty air, assert the recovery ladder resets a wedged action, assert Breed
+    stays a no-op, and assert the visual-gag behavior plays frames 38–46 without spawning.
+
+### Second backend: Android "sequence bundle" packs (sesame/lacis) — added 2026-08-20
+
+Some community pets ship as **Android bundles** (`manifest.json` + `animation.json` +
+`sprites/%04d.webp`) rather than group-finity XML. Those cannot be parsed by the XML core, so a
+parallel backend exists:
+
+- **`mascot_sequence_pack.py`** — pure Python (no Qt) runtime over `animation.json`: named-animation
+  FSM with per-frame sprite/dx/dy/tick duration, weighted `onFinish`, contact-driven
+  `borderTransitions` (floor/wall/ceiling), and an event table; external tick clock like `MascotCore`.
+- **`mascot_sequence_widget.py`** — thin QObject wrapper exposing the *identical* signal/method
+  surface as `MascotEngine` (`frame_changed`, `position_changed`, `force_behavior`, `set_dragging`,
+  `inject_throw`, …). App selects the backend by pack content: `<pack>/manifest.json` present →
+  sequence widget, else XML engine. **The XML path is byte-for-byte untouched** — the two backends
+  share no mutable state (this is what keeps PC packs safe when iterating on bundles).
+
+Documented bundle compromises (less data than a PC pack): no window(IE)/mouse-face interactions;
+throws = fling pose + gravity integration of the flick velocity (no IE physics); feet anchored at
+image bottom-center (full-canvas art, no per-pose anchor — tune via `window.width`); `idle`'s
+self-only loop gets a synthesized 12–36 s budget so it always returns to ambient (the Android app
+exits it by tap; nothing taps here). Ceiling-hang frames are flipped vertically while playing
+CEILING animations (the art is authored upside-down for hanging). Forced-name mapping lives in
+`FORCED_NAME_ALIASES` (`Dragged→drag`, `Thrown→fling`, `SitDown→idle`, …); unknown names no-op.
+Tests: `tests/test_sequence_pack.py` (pure Python, no QApplication).
 
 ## 6. Source Files (Reference Copies)
 

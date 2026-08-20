@@ -58,7 +58,14 @@ class App(QObject):
         self.sounds = SoundBank(config)
         self.health = WorkTimer(config)
         self._mascot_on = bool(self.config.get("mascot.enabled", False))
-        self.mascot = MascotEngine(config, parent=self) if self._mascot_on else None
+        # Backend selection by pack content: an Android "sequence bundle" (manifest.json +
+        # animation.json) runs on MascotSequenceWidget; standard Shimeji XML packs run on
+        # MascotEngine. App's code below works with either — both expose the same surface.
+        if self._mascot_on and (self.config.mascot_pack_dir / "manifest.json").exists():
+            from .mascot_sequence_widget import MascotSequenceWidget
+            self.mascot = MascotSequenceWidget(config, parent=self)
+        else:
+            self.mascot = MascotEngine(config, parent=self) if self._mascot_on else None
 
         # keep the terrain callbacks pointed at the live window geometry
         self.physics.set_mover(
@@ -487,8 +494,19 @@ class App(QObject):
             logger.debug("vault journal failed: %s", exc)
 
     def _setup_tray(self):
-        pack_icon = Path(self.config.mascot_pack_dir) / "img" / "icon.png"
+        # XML packs ship <pack>/img/icon.png; sequence bundles ship a thumbnail.webp preview.
+        pack_dir = self.config.mascot_pack_dir
+        pack_icon = pack_dir / "img" / "icon.png"
         if not pack_icon.exists():
+            try:
+                import json as _json
+                manifest = _json.loads((pack_dir / "manifest.json").read_text(encoding="utf-8"))
+                thumb_rel = (manifest.get("preview") or {}).get("thumbnail", "")
+                if thumb_rel and (pack_dir / str(thumb_rel)).exists():
+                    pack_icon = pack_dir / str(thumb_rel)
+            except Exception:  # noqa: BLE001 - fall through to the default icon below
+                pass
+        if not Path(pack_icon).exists():
             pack_icon = self.config.resolve_path("assets/steve_shimeji/img/icon.png")
         icon_path = str(pack_icon)
         names = self.mascot.behavior_names if self.mascot is not None else []
