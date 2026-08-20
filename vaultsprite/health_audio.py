@@ -7,11 +7,16 @@ Two concerns in one file per the outline:
   no-op stub instead of crashing at import/startup.
 - :class:`WorkTimer` — accumulates continuous WORK minutes (fed by M5 context)
   and, after the configured threshold (outline: 45–60 min), emits ``stretch_nudge``
-  once and pauses until main resolves it (skip / stretch / postpone).
+  once and pauses until main resolves it (skip / stretch / postpone). On Windows it
+  additionally gates accumulation on real OS input activity: a gap longer than
+  ``health.afk_cutoff_s`` with no keyboard/mouse input (StretchBreak's frame-drop
+  cutoff) zeroes the banked progress, so laptop-suspend or long lunch during WORK
+  context can't silently credit "continuous work". Off-Windows the gate is inactive.
 """
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Optional, Union
 
@@ -20,6 +25,37 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .config import Config, load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _seconds_since_user_input() -> Optional[float]:
+    """Seconds since the last keyboard/mouse input, or ``None`` when unknown.
+
+    Windows-only via ``GetLastInputInfo`` (StretchBreak's idle source ported to a 5 s
+    polling read instead of their event loop). Any failure returns None so callers fall
+    back to plain timer accumulation — the gate must never turn an OS hiccup into a
+    frozen work counter."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _LastInputInfo(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+        info = _LastInputInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        # tick count is a 32-bit wrap; the & mask makes subtraction wrap-safe in Python
+        now_ms = ctypes.windll.kernel32.GetTickCount()
+        delta_ms = (now_ms - info.dwTime) & 0xFFFFFFFF
+        if delta_ms > 86_400_000:                      # implausible → treat as unknown
+            return None
+        return delta_ms / 1000.0
+    except Exception as exc:
+        logger.debug("idle probe failed (%s); gate inactive this tick", exc)
+        return None
 
 try:  # pygame is imported lazily-guarded; headless boxes get a no-op SoundBank
     import pygame
@@ -105,10 +141,14 @@ class SoundBank:
 
 
 class WorkTimer(QObject):
-    """Continuous-work accumulator → stretch nudge state machine."""
+    """Continuous-work accumulator → stretch nudge state machine.
+
+    "Continuous" is real on Windows: each tick also checks the OS last-input timestamp,
+    and a gap over ``afk_cutoff_s`` with no input resets accumulated progress (the user
+    was not actually working). The gate is optional/config-driven and inactive where the
+    platform cannot answer the probe."""
 
     stretch_nudge = Signal()      # fired once per threshold, pauses until resolved
-    work_minutes_changed = Signal(int)   # coarse progress for a status bar (optional)
 
     def __init__(self, config: Union[Config, None] = None):
         super().__init__()
@@ -116,6 +156,10 @@ class WorkTimer(QObject):
         section = self.config.section("health")
         self._threshold_min = int(section.get("work_threshold_min", 50))   # 45–60
         tick_ms = int(section.get("nudge_tick_ms", 5000))
+        # OS-idle gate (Windows GetLastInputInfo): after this many seconds with no input,
+        # banked "continuous work" is discarded — StretchBreak's 30s frame-drop cutoff.
+        self._use_os_idle = bool(section.get("use_os_idle", True))
+        self._afk_cutoff_s = float(section.get("afk_cutoff_s", 30))
 
         self._timer = QTimer(self)
         self._timer.setInterval(tick_ms)
@@ -127,7 +171,10 @@ class WorkTimer(QObject):
         self._timer.timeout.connect(self._tick)
 
         self._work_seconds = 0.0
-        self._active = True       # set by M5: only accumulate in WORK context
+        # OFF by default — M5 calls set_active(True) only on a real WORK classification, so
+        # an unknown-foreground boot (fresh app start / Linux dev box) can never accrue work
+        # time or fire a nudge ("nudge while idle" bug class). main.start() no longer forces it.
+        self._active = False      # set by M5: only accumulate in WORK context
         self._nudge_pending = False   # paused until main resolves the nudge
 
     # -- tuning / introspection -------------------------------------------------
@@ -183,6 +230,17 @@ class WorkTimer(QObject):
     def _tick(self):
         if not self._active or self._nudge_pending:
             return
+        # OS-idle gate: no keyboard/mouse input for afk_cutoff_s means the user was away
+        # (suspend / lunch) — banked progress is stale, discard it. None = platform can't
+        # say → plain accumulation as before (off-Windows behavior is unchanged).
+        if self._use_os_idle:
+            idle_for = _seconds_since_user_input()
+            if idle_for is not None and idle_for >= self._afk_cutoff_s \
+                    and self._work_seconds > 0:
+                logger.info("health gate: %.0fs without input — resetting %ds of banked work",
+                            idle_for, int(self._work_seconds))
+                self._work_seconds = 0.0
+                return
         self._work_seconds += self._tick_s
         threshold_s = self._threshold_min * 60
         if self._work_seconds >= threshold_s:

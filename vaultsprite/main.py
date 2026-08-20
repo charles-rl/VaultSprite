@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -66,8 +67,25 @@ class App(QObject):
             pet_size=self.window.size_px,
         )
         self.agent.set_overlay_winid(self.window.winId())
+        self.context.set_overlay_winid(self.window.winId())   # don't classify our own overlay window
         self._context_now: str = "UNKNOWN"
         self._prev_context: str = "UNKNOWN"
+
+        # --- vision request tracking (see _ask_vision / _on_agent_error) ----------
+        # True from ask() until the reply OR error delivers — decides which outcome a
+        # failure/timeout is still allowed to replace the 'Thinking…' bubble for.
+        self._vision_pending = False
+        self._stretch_nudge_active = False   # A stretch nudge was shown, awaiting resolution
+        self._last_yawn_mono = 0.0           # M8 §5.4 yawn pacing (cooldown across rest entries)
+
+        self.agent.response_ready.connect(self._on_agent_reply)
+        self.agent.error.connect(self._on_agent_error)
+
+        # Watchdog: a reply must arrive within llm_timeout_s + margin or the in-flight
+        # gate is released and the fallback line replaces any dangling 'Thinking…'.
+        self._vision_watchdog = QTimer(self)
+        self._vision_watchdog.setSingleShot(True)
+        self._vision_watchdog.timeout.connect(self._on_vision_timeout)
 
         # --- wiring ------------------------------------------------------------
         w = self.window
@@ -108,10 +126,6 @@ class App(QObject):
         if bool(self.config.get("hide.enabled", True)) or self.mascot is not None:
             self._setup_tray()
 
-        self.agent.response_ready.connect(self._on_agent_reply)
-        self.agent.error.connect(
-            lambda m: logger.info("vision note: %s", (m or "")[:120]))
-
         w.hide_requested.connect(self._on_hide_requested)
 
         # --- hide/show behavior (walk to nearest edge, pause autonomy) -------------
@@ -147,7 +161,10 @@ class App(QObject):
             self.physics.start()
         self.stats.start()
         self.context.start()          # no-ops on Linux (pwc unavailable); still fine
-        self.health.start()
+        # WorkTimer only ARMS once the detector actually reports WORK — at boot context is
+        # UNKNOWN, and leaving it inactive here is what prevents a nudge after N ticks of
+        # unknown foreground (the "nudge fires while idle" bug class this gate exists for).
+        self.health.start()           # ticking is harmless while inactive; set_active(True) comes via _on_context_changed
 
         ask_ms = int(self.config.get("remote.ask_interval_ms", 0))
         if ask_ms > 0 and self.agent.enabled:
@@ -189,8 +206,9 @@ class App(QObject):
                 tray.hide()
             except Exception:  # pragma: no cover
                 pass
-        for stopper in (self._size_timer.stop, self._vision_timer.stop, self._hide_timer.stop,
-                        self.physics.stop, self.stats.stop, self.context.stop, self.health.stop):
+        for stopper in (self._size_timer.stop, self._vision_timer.stop, self._vision_watchdog.stop,
+                        self._hide_timer.stop, self.physics.stop, self.stats.stop,
+                        self.context.stop, self.health.stop):
             try:
                 stopper()
             except Exception as exc:  # pragma: no cover - teardown best-effort
@@ -200,8 +218,31 @@ class App(QObject):
     def _play(self, transition: StateTransition):
         self._log_state_transition(transition)   # every state change funnels through here
         self.window.play_state(transition)
-        if transition.name == "walking":
-            pass  # per-frame walk drift handled by SpritePlayer.position_delta → window
+        if not self._hidden and not getattr(self.mascot, "_hide_walking", False):
+            self._ambient_sounds_for(transition.name)     # legacy mode (M8 doc §5.4 wiring point)
+
+    def _on_mascot_behavior(self, name: str):
+        """M9 telemetry → Vault debug trail + ambient SFX (both gated by config)."""
+        x, y = self.window.position()
+        self._debug_log("mascot", f"behavior -> {name} (pos=({x},{y}))")
+        if not self._hidden and not getattr(self.mascot, "_hide_walking", False):
+            self._ambient_sounds_for(name)
+
+    # -- ambient SFX hooks (M8 doc §5.4: walking→step loop, resting/sleeping→yawn once)
+    _YAWN_NAMES = frozenset({"liedown", "sleeping"})   # M9 pack behavior + legacy FSM state
+    _WALK_WORDS = ("walk", "run", "crawl")
+
+    def _ambient_sounds_for(self, name: str):
+        low = (name or "").lower()
+        if any(w in low for w in self._WALK_WORDS):
+            self.sounds.play_loop("step")      # overlapping plays are safe; loop runs until a non-walk state stops it
+        else:
+            self.sounds.stop("step")           # left walking — stop the footstep loop (no-op when idle)
+        if low in self._YAWN_NAMES:
+            now = time.monotonic()
+            if now - self._last_yawn_mono >= float(self.config.get("health.yawn_cooldown_s", 300)):
+                self.sounds.play("yawn")       # one yawn per rest episode, paced by cooldown
+                self._last_yawn_mono = now
 
     def _debug_log(self, category: str, entry: str):
         """Best-effort rolling debug trail in the Vault (user-facing debugging aid)."""
@@ -236,10 +277,34 @@ class App(QObject):
             self.mascot.force_behavior("Dragged")
 
     def _on_pet_clicked(self):
-        """Petting: a little energy + a friendly blip."""
+        """Petting: a little energy + a friendly blip.
+
+        Exception: while a stretch nudge is pending, the click IS the resolution —
+        'I stretched' resets the work clock fully instead of feeding the pet."""
+        if self._stretch_nudge_active and not self.window.dragging:
+            self.health.resolve_nudge("stretch")
+            self._stretch_nudge_active = False
+            self.sounds.play("chirp")
+            self._say("Great break!")
+            # drop any nudge pose so the pet visibly resumes normal ambient behavior
+            if self.mascot is not None:
+                self.mascot.force_behavior("SitDown")
+            else:
+                t = self.fsm.force_state(self.fsm.current_state)
+                self._play(t)
+            return
         from .stat_engine import StatKind
         self.stats.adjust(StatKind.ENERGY, 4)
         self.sounds.play("chirp", volume=0.5)
+
+    def _on_dismiss(self):
+        """Tray 'Dismiss': while a stretch nudge is pending this resolves it as a
+        postpone (partial credit back — the next nudge comes sooner)."""
+        if not self._stretch_nudge_active:
+            return
+        self.health.resolve_nudge("postpone")
+        self._stretch_nudge_active = False
+        self._say("Okay — I'll nudge you again soon.")
 
     def _on_drag_released(self, vx: float, vy: float):
         """Drag ended (flick or plain drop). The window already cleared its own
@@ -293,6 +358,9 @@ class App(QObject):
             # WORK active on UNKNOWN, which is why stretch nudges fired while idle.
             self.stats.set_active(False)     # decay pauses in play / unknown
             self.health.set_active(False)    # and the work clock resets
+            if self._stretch_nudge_active:   # WorkTimer.cancel is its own nudge auto-cancel — mirror it here
+                logger.info("stretch nudge cancelled (leaving WORK context)")
+                self._stretch_nudge_active = False
         elif context == "WORK":
             self.stats.set_active(True)
             self.health.set_active(True)
@@ -314,6 +382,7 @@ class App(QObject):
     def _trigger_stretch_nudge(self):
         if self._hidden or self.window.dragging or self.physics.falling:
             return     # defer if the pet is mid-air / held / hidden; re-arms next tick window
+        self._stretch_nudge_active = True     # resolution armed until click/tray/context-switch
         if self.mascot is not None:
             self.mascot.force_behavior("SitDown")
         else:
@@ -347,13 +416,48 @@ class App(QObject):
         The LLM call runs off-thread (RemoteAgent.ask), but a remote 27B model can take
         many seconds (cold start / dev-tunnel), which reads as a frozen pet with no
         indicator. Show an instant "thinking…" bubble so the pet visibly responds the
-        moment you ask; ``_on_agent_reply`` replaces it with the actual reply.
+        moment you ask; ``_on_agent_reply`` replaces it with the actual reply, and the
+        watchdog guarantees that NO failed/timed-out ask leaves the bubble dangling.
         """
+        self._vision_pending = True
+        margin_ms = int(float(self.config.get("remote.llm_timeout_s", 120)) * 1000) + 15_000
+        self._vision_watchdog.start(margin_ms)
         self._say("Thinking\u2026")
         self.agent.ask(prompt, window_context=window_context)
+        if not self.agent.in_flight:     # dropped immediately (gate or no client) — the error path owns UX
+            self._vision_pending = False
+
+    def _on_vision_timeout(self):
+        """Watchdog fired with no reply/error yet: unstick the in-flight gate and show
+        the fallback line so a hung/cold LLM can't leave 'Thinking…' on screen forever."""
+        if not self._vision_pending:
+            return
+        logger.warning("vision ask timed out — releasing in-flight gate")
+        self.agent.cancel_inflight()
+        self.agent.last_error_at = time.monotonic()   # treat a hang as a failure: cooldown autonomous asks
+        self._vision_pending = False
+        if not self._hidden:
+            self._say(str(self.config.get(
+                "remote.fallback_line", "Sorry — I can't see clearly right now.")))
+
+    def _on_agent_error(self, msg: str):
+        """A vision ask failed (network/timeout/model). Surface a short pet-idiomatic
+        line instead of the dangling 'Thinking…' bubble; details go to the log only."""
+        logger.info("vision note: %s", (msg or "")[:120])
+        if self._vision_pending:
+            self._vision_pending = False     # RemoteAgent already cleared its gate
+        if not self._hidden:
+            self._say(str(self.config.get(
+                "remote.fallback_line", "Sorry — I can't see clearly right now.")))
 
     def _vision_tick(self):
         if self._hidden or self.window.dragging or not self.agent.enabled:
+            return
+        # after any failed LLM call, pause autonomous asks for a while — don't hammer a
+        # dead server every ask_interval_ms (user-triggered asks are unaffected).
+        cooldown = float(self.config.get("remote.vision_fail_cooldown_s", 300) or 0)
+        if cooldown > 0 and time.monotonic() - self.agent.last_error_at < cooldown:
+            logger.debug("autonomous vision ask in fail-cooldown")
             return
         prompt = ("Look at my screen and, in one short sentence, tell me what I appear "
                   "to be doing right now.")
@@ -361,6 +465,12 @@ class App(QObject):
         self._ask_vision(prompt, window_context=self._vision_window_context())
 
     def _on_agent_reply(self, text: str):
+        if not self._vision_pending:
+            # late delivery after an error/timeout already took over UX — ignore it so a
+            # stale 120s-old answer can't overwrite whatever the pet is saying now.
+            logger.debug("late vision reply ignored (%d chars)", len(text or ""))
+            return
+        self._vision_pending = False
         if not (text or "").strip():
             return
         self._say(text.strip())
@@ -376,11 +486,6 @@ class App(QObject):
         except Exception as exc:  # pragma: no cover
             logger.debug("vault journal failed: %s", exc)
 
-    def _on_mascot_behavior(self, name: str):
-        """M9 telemetry → Vault debug trail (debug.vault_logging; default on)."""
-        x, y = self.window.position()
-        self._debug_log("mascot", f"behavior -> {name} (pos=({x},{y}))")
-
     def _setup_tray(self):
         icon_path = str(Path(self.config.resolve_path("assets/steve_shimeji/img/icon.png")))
         names = self.mascot.behavior_names if self.mascot is not None else []
@@ -388,6 +493,7 @@ class App(QObject):
         self._tray.scale_changed.connect(self._on_scale_changed)
         self._tray.behavior_toggled.connect(self._on_behavior_toggled)
         self._tray.hide_toggled.connect(self._on_hide_toggled)
+        self._tray.dismiss_requested.connect(self._on_dismiss)
         self._tray.quit_requested.connect(self._on_quit_requested)
         self._tray.show()
 
@@ -528,7 +634,10 @@ class App(QObject):
         x, y = self.window.position()
         return {"x": x, "y": y,
                 "behavior": self.mascot.active_behavior if self.mascot else "",
-                "frame": self.mascot.current_frame() if self.mascot else ""}
+                "frame": self.mascot.current_frame() if self.mascot else "",
+                # live stat values (T2): previously emitted but consumed nowhere — the
+                # inspector now shows them; stat_changed also bumps a refresh immediately.
+                **{f"stat_{k}": v for k, v in self.stats.stats().items()}}
 
     def _say(self, text: str):
         if self._hidden or not (self.window and self.window.isVisible()):

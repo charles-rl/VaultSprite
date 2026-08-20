@@ -1,6 +1,8 @@
 """HealthAudio: WorkTimer state machine + SoundBank headless no-ops."""
 from __future__ import annotations
 
+import sys
+
 import pytest
 from PySide6.QtCore import QTimer
 
@@ -124,6 +126,69 @@ def test_qtimer_path_fires_real_signal(qapp):
     qapp.exec()
     wt.stop()
     assert fired, "real QTimer path never reached the threshold"
+
+
+# -- C1: OS-idle gate (Windows GetLastInputInfo; inactive where the probe returns None) ---
+def test_idle_gate_resets_banked_work_on_long_afk(qapp, monkeypatch):
+    import vaultsprite.health_audio as ha
+
+    cfg = FakeConfig({
+        "health.work_threshold_min": 7,      # 420s — four 100s ticks (400s) stay under the nudge line
+        "health.nudge_tick_ms": 50,
+        "health.tick_work_seconds": 100,
+    })
+    wt = WorkTimer(cfg)
+    monkeypatch.setattr(ha, "_seconds_since_user_input", lambda: None)   # off-Windows baseline
+    wt.set_active(True)
+    for _ in range(4):
+        wt._tick()                                   # bank 400s (under the 420s threshold)
+    assert wt.work_seconds == 400
+
+    monkeypatch.setattr(ha, "_seconds_since_user_input", lambda: 45.0)   # user away > 30s cutoff
+    wt._tick()                                       # AFK tick → discard progress, credit nothing
+    assert wt.work_seconds == 0.0, \
+        f"AFK gate must zero banked work before crediting, got {wt.work_seconds}"
+
+    monkeypatch.setattr(ha, "_seconds_since_user_input", lambda: 5.0)    # back → normal credit
+    wt._tick()
+    assert wt.work_seconds == 100
+
+
+def test_idle_gate_disabled_by_config(qapp, monkeypatch):
+    import vaultsprite.health_audio as ha
+
+    cfg = FakeConfig({
+        "health.work_threshold_min": 4,
+        "health.nudge_tick_ms": 50,
+        "health.tick_work_seconds": 100,
+        "health.use_os_idle": False,                 # gate off → AFK irrelevant
+    })
+    wt = WorkTimer(cfg)
+    monkeypatch.setattr(ha, "_seconds_since_user_input", lambda: 9_999.0)   # long away…
+    wt.set_active(True)
+    for _ in range(2):
+        wt._tick()                                   # …still credited with the gate off
+    assert wt.work_seconds == 200
+
+
+def test_idle_gate_unknown_probe_is_noop_off_windows(qapp, monkeypatch):
+    """The real helper returns None where GetLastInputInfo doesn't exist → plain accumulation."""
+    import vaultsprite.health_audio as ha
+
+    if sys.platform != "win32":
+        assert ha._seconds_since_user_input() is None
+
+    cfg = FakeConfig({                               # threshold 4 min — two ticks stay under it
+        "health.work_threshold_min": 4,
+        "health.nudge_tick_ms": 50,
+        "health.tick_work_seconds": 100,
+    })
+    wt = WorkTimer(cfg)
+    # exercise the LIVE (None-returning on Linux) helper path, not a monkeypatched stub:
+    wt.set_active(True)
+    for _ in range(2):
+        wt._tick()
+    assert wt.work_seconds == 200                    # gate inactive → unchanged behavior
 
 
 # -- SoundBank headless behaviour ----------------------------------------------------

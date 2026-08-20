@@ -1,6 +1,8 @@
 """App-level wiring: the 8 modules cooperate via signals in one process."""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tests.conftest import FakeConfig, spin
@@ -12,8 +14,51 @@ def _test_config(tmp_path, mascot=False):
         "remote.ask_interval_ms": 0,                       # vision loop off in CI
         "health.work_threshold_min": 1,
         "stats.tick_ms": 30_000,                           # don't tick during tests
+        "stats.persist": False,                            # integration App.stop() must not write repo state
         "mascot.enabled": mascot,                          # legacy-FSM tests exercise M2; boots exercise M9
     })
+
+
+class _FakeVisionAgent:
+    """Test double for RemoteAgent — simulates the QThread round-trip by calling the
+    app's slots directly (the real agent's Qt signal wiring is covered in its own file)."""
+
+    enabled = True
+    model = "test-model"
+    last_error_at = 0.0
+
+    def __init__(self, fail=None):
+        self.fail = fail                # exception class to raise on ask()
+        self.in_flight_state = False
+        self.asked: list[str] = []
+
+    @property
+    def in_flight(self):
+        return self.in_flight_state
+
+    def ask(self, prompt, window_context=""):      # mirrors the real agent: dispatch ⇒ in flight
+        if self.fail is not None:
+            raise self.fail("boom")
+        self.asked.append(prompt)
+        self.in_flight_state = True
+
+    def cancel_inflight(self):
+        self.in_flight_state = False
+
+
+def _swap_agent(app, fake=None):
+    """Replace App.agent with the stub (real one is a 120s-remote client — CI must not touch it)."""
+    app.agent = fake if fake is not None else _FakeVisionAgent()
+
+
+def _spin_until(qapp, cond, timeout_s=3.0):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        qapp.processEvents()
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 def test_app_boots_and_wires(qapp, tmp_path):
@@ -293,3 +338,234 @@ def test_scale_change_triggers_respawn_unless_hidden(qapp, tmp_path, monkeypatch
     app._on_scale_changed(1.5)
     assert calls == [1]                     # hidden → no respawn
     app.shutdown()
+
+
+# -- A2: vision error/timeout UX + autonomous fail-cooldown --------------------------------
+def test_vision_error_shows_fallback_and_clears_pending(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path))
+    app.window.show()                       # _say only bubbles when the window is visible
+    bubbles = []
+    app.window.show_bubble = lambda text, *a, **k: bubbles.append(text)
+    fake = _FakeVisionAgent()
+    _swap_agent(app, fake)
+
+    app._ask_vision("what am I doing?")
+    assert app._vision_pending and "Thinking\u2026" in bubbles[-1]
+    # worker thread fails (queued error signal arrives on the next event-loop pass)
+    spin(qapp, lambda: True, timeout_s=0.05)   # pump so queued signals can't sneak in first
+    app._on_agent_error("connection reset by peer")
+    assert not app._vision_pending             # App state cleared…
+    assert bubbles[-1] == "Sorry — I can't see clearly right now."     # …and bubble replaced
+
+    # late reply after the error must be ignored (no stale overwrite)
+    app._on_agent_reply("stale answer from 2 minutes ago")
+    assert bubbles[-1] == "Sorry — I can't see clearly right now."
+    app.shutdown()
+
+
+def test_vision_timeout_releases_gate_and_shows_fallback(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    cfg = _test_config(tmp_path)
+    cfg._tree["remote"]["llm_timeout_s"] = 0.5   # small → a short watchdog margin for the test
+    app = App(cfg)
+    app.window.show()                       # _say only bubbles when the window is visible
+    bubbles = []
+    app.window.show_bubble = lambda text, *a, **k: bubbles.append(text)
+
+    class _HungFake(_FakeVisionAgent):
+        def ask(self, prompt, window_context=""):
+            self.in_flight_state = True          # hang forever — never delivers either signal
+
+    fake = _HungFake()
+    _swap_agent(app, fake)
+
+    app._ask_vision("what am I doing?")
+    assert app.agent.in_flight and app._vision_pending
+    assert "Thinking\u2026" in bubbles[-1]
+
+    # simulate the watchdog firing (its timer wiring is a plain 2-line connect; here we invoke
+    # the slot directly, as timeout would once its interval elapses):
+    app._on_vision_timeout()
+    assert not fake.in_flight                    # gate released for the next ask…
+    assert not app._vision_pending               # …and the stale-hung reply can no longer take over UX
+    assert bubbles[-1] == "Sorry — I can't see clearly right now."
+
+    # a late reply that finally arrives must be ignored, not shown:
+    app._on_agent_reply("way too late answer")
+    assert bubbles[-1] == "Sorry — I can't see clearly right now."
+    app.shutdown()
+
+
+def test_autonomous_vision_tick_respects_fail_cooldown(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path))
+    fake = _FakeVisionAgent()
+    _swap_agent(app, fake)
+    # fresh window: not dragging, app._hidden False → the tick guard is open
+
+    # a recent failure puts autonomous asks into cooldown…
+    fake.last_error_at = time.monotonic()
+    app._vision_tick()
+    assert not fake.asked                        # suppressed during the 300s default window
+    # …but once stale they run again.
+    fake.last_error_at = time.monotonic() - 400
+    app._vision_tick()
+    assert len(fake.asked) == 1 and "screen" in fake.asked[0]
+    app.shutdown()
+
+
+# -- A3: stretch-nudge resolution paths -----------------------------------------------------
+def _armed_nudge_app(qapp, tmp_path, threshold_min=None):
+    """App whose WorkTimer is genuinely at-threshold pending (fast-forwarded credits).
+
+    The firing `stretch_nudge` signal travels the REAL wiring (WorkTimer → App), so when
+    this returns, App._stretch_nudge_active is already set — production behavior, not a stub.
+    """
+    from vaultsprite.main import App
+
+    cfg = _test_config(tmp_path)                          # default: health.work_threshold_min=1
+    if threshold_min is not None:
+        cfg._tree["health"]["work_threshold_min"] = threshold_min
+    cfg._tree["health"]["tick_work_seconds"] = 40         # fast-forward: each tick credits 40 work-seconds
+    app = App(cfg)
+    app.health.set_active(True)                           # as _on_context_changed("WORK") would do
+    while not app.health.nudge_pending:                   # ticks until the real signal fires…
+        app.health._tick()
+    return app
+
+
+def test_stretch_nudge_resolved_by_pet_click(qapp, tmp_path):
+    from vaultsprite.main import App   # noqa: F401 (imported for parity with sibling tests)
+
+    app = _armed_nudge_app(qapp, tmp_path)
+    assert app.health.nudge_pending
+    assert app._stretch_nudge_active             # set by the real WorkTimer→App signal path
+
+    # pet click while the nudge is active → full resolution, NOT the +4 energy petting path
+    energy_before = app.stats.get_stat("energy")
+    app._on_pet_clicked()
+    assert not app.health.nudge_pending           # timer re-armed for the next cycle
+    assert not app._stretch_nudge_active          # App-level flag cleared in lockstep
+    assert app.stats.get_stat("energy") == energy_before   # no +4 petting happened
+
+
+def test_stretch_nudge_postponed_by_tray_dismiss(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    # 30-min threshold so postpone's default 25-min partial credit is observable (>0);
+    # with the tiny 1-min CI threshold it clamps to a full reset by design.
+    app = _armed_nudge_app(qapp, tmp_path, threshold_min=30)
+    app.window.show()                             # bubbles only appear while visible
+    assert app._stretch_nudge_active              # arming already fired via the signal path
+    bubbles = []
+    app.window.show_bubble = lambda text, *a, **k: bubbles.append(text)
+
+    app._on_dismiss()                             # tray 'Dismiss' while pending → postpone
+    assert not app.health.nudge_pending           # resolve_nudge("postpone") ran…
+    assert app.health.work_seconds == (30 - 25) * 60   # …with partial credit back (next nudge sooner)
+    assert not app._stretch_nudge_active
+    assert any("soon" in b for b in bubbles)
+
+
+def test_leaving_work_context_cancels_stretch_nudge(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = _armed_nudge_app(qapp, tmp_path)
+    assert app._stretch_nudge_active              # already armed via the signal path
+
+    app._on_context_changed("PLAY")               # user walked away from work → auto-cancel
+    assert not app._stretch_nudge_active, "pending nudge must clear when leaving WORK"
+
+
+def test_pet_click_without_pending_nudge_is_plain_petting(qapp, tmp_path):
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path))
+    assert not app._stretch_nudge_active
+    energy_before = app.stats.get_stat("energy")
+    app._on_pet_clicked()
+    assert app.stats.get_stat("energy") == min(100, energy_before + 4)   # original behavior intact
+
+
+# -- T1: ambient SFX wiring (M8 doc §5.4 — walking→step loop, resting→yawn once) ---------
+def _stub_sounds(app):
+    class _S:
+        def __init__(self):
+            self.played = []      # one-shots by name
+
+        def play(self, name, *a, **k):
+            self.played.append(name)
+
+        def stop(self, name, *a, **k):
+            self.played.append(f"stop:{name}")
+
+        def play_loop(self, name, *a, **k):
+            self.played.append(f"loop:{name}")
+
+    app.sounds = _S()
+    return app.sounds
+
+
+def test_walk_states_start_step_loop_and_others_stop_it(qapp, tmp_path):
+    from vaultsprite.main import App   # noqa: F401 (parity with sibling tests)
+
+    app = App(_test_config(tmp_path))
+    s = _stub_sounds(app)
+    app._hidden = False
+    app._ambient_sounds_for("WalkAlongWorkAreaFloor")      # M9 walk behavior
+    assert "loop:step" in s.played
+    app._ambient_sounds_for("RunAlongIECeiling")           # also a walk (run) — re-assert, idempotent
+    assert s.played.count("loop:step") >= 2
+    app._ambient_sounds_for("SitDown")                     # any non-walk state stops the loop
+    assert "stop:step" in s.played[-3:]
+
+
+def test_legacy_fsm_state_names_drive_the_same_hooks(qapp, tmp_path):
+    from vaultsprite.main import App   # noqa: F401
+
+    app = App(_test_config(tmp_path))
+    s = _stub_sounds(app)
+    app._hidden = False
+    app._ambient_sounds_for("walking")          # legacy transition name (assets/config.yaml state key)
+    assert "loop:step" in s.played
+    app._ambient_sounds_for("sleeping")         # legacy resting state → yawn, and stops the loop
+    assert "yawn" in s.played and "stop:step" in s.played
+
+
+def test_yawn_fires_once_per_rest_episode_then_cooldown(qapp, tmp_path):
+    from vaultsprite.main import App   # noqa: F401
+
+    cfg = _test_config(tmp_path)
+    cfg._tree["health"]["yawn_cooldown_s"] = 300
+    app = App(cfg)
+    s = _stub_sounds(app)
+    app._hidden = False
+    app._ambient_sounds_for("LieDown")          # M9 rest behavior → one yawn
+    assert s.played.count("yawn") == 1
+    app._ambient_sounds_for("SitDown")          # left resting (no second yawn source)
+    app._ambient_sounds_for("LieDown")          # back to rest within cooldown → NO repeat yawn
+    assert s.played.count("yawn") == 1, "cooldown must gate a second yawn in the same episode window"
+
+
+# -- T2: telemetry inspector shows live stat values -----------------------------------------
+def test_telemetry_overlay_includes_live_stats(qapp, tmp_path):
+    """T2: the stat values (previously emitted but consumed nowhere) now show in the inspector."""
+    from vaultsprite.main import App
+
+    app = App(_test_config(tmp_path))            # legacy mode; _mascot_telemetry handles mascot=None
+    d = app._mascot_telemetry()                  # getter now carries stat_* keys alongside pos/behavior/frame
+    assert any(str(k).startswith("stat_") for k in d), f"telemetry dict lacks stat fields: {d.keys()}"
+
+    from vaultsprite.ui_overlay import TelemetryOverlay
+    ov = TelemetryOverlay()
+    try:
+        ov.start(lambda: d)                      # one deterministic refresh (500 ms timer also fires; harmless)
+        text = ov._label.text()
+        assert "hunger=" in text and "energy=" in text, \
+            f"telemetry label must show live stat values, got:\n{text}"
+    finally:
+        ov.close()                               # closes our overlay (App's own would be closed by shutdown)

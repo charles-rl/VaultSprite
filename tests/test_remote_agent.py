@@ -124,3 +124,108 @@ def test_ask_when_client_unavailable(qapp, agent):
     agent.ask("hello")                          # no thread spawned; immediate error
     spin(qapp, lambda: True, timeout_s=0.1)
     assert len(errors) == 1
+
+
+# -- A1: failed requests must release the in-flight gate AND clean up their QThread ----
+def test_failed_request_cleans_worker_thread_and_releases_gate(qapp, agent):
+    import httpx as _httpx
+
+    class _BoomCompletions:
+        def create(self, **kwargs):
+            raise _httpx.ConnectError("connection refused")   # transport blip → retried once
+
+    agent._client = SimpleNamespace(chat=SimpleNamespace(completions=_BoomCompletions()))
+    errors = []
+    agent.error.connect(errors.append)
+    assert not agent.in_flight
+    agent.ask("hello", screenshot=False)        # transient → 1 retry, then error
+    assert spin(qapp, lambda: errors), "error signal never fired"
+    assert agent.in_flight is False             # A2: gate released on failure
+    # built-in QThread.finished → deleteLater ran (the old custom-shadowed `finished` did not)
+    qapp.processEvents()
+    qapp.processEvents()
+    from vaultsprite.remote_agent import _BrainThread
+    leaked = [c for c in agent.children() if isinstance(c, _BrainThread)]
+    assert not leaked, f"worker thread leaked: {len(leaked)} QThread(s) still parented"
+
+
+def test_inflight_gate_drops_second_ask(qapp, agent):
+    """One concurrent ask max — a second call while the first is in flight is dropped."""
+    import time as _t
+
+    replies = []
+    agent.response_ready.connect(replies.append)
+
+    class _SlowCompletions:
+        def create(self, **kwargs):
+            _t.sleep(0.3)                        # hold long enough for a 2nd ask to land
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="late reply"))])
+
+    agent._client = SimpleNamespace(chat=SimpleNamespace(completions=_SlowCompletions()))
+    assert not agent.in_flight
+    agent.ask("first", screenshot=False)
+    assert agent.in_flight is True               # worker spawned and in flight
+    agent.ask("second", screenshot=False)        # must be dropped, no second thread
+
+    assert spin(qapp, lambda: replies or not agent.in_flight), "no reply and gate stuck"
+    qapp.processEvents()                         # let any (wrongly) queued delivery settle
+    assert replies.count("late reply") == 1      # exactly ONE ask produced a reply
+
+
+# -- Slice B: transport-level retry + max_tokens ---------------------------------------
+def test_transient_error_retries_once_then_succeeds(qapp, agent, monkeypatch):
+    import httpx as _httpx
+
+    calls = []
+
+    class _FlakyCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs.get("model"))
+            if len(calls) == 1:
+                raise _httpx.ConnectError("dns blip")      # transport error → retried after backoff
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="recovered"))])
+
+    monkeypatch.setattr("vaultsprite.remote_agent.time.sleep", lambda s: None)  # no real backoff in CI
+    agent._client = SimpleNamespace(chat=SimpleNamespace(completions=_FlakyCompletions()))
+    replies, errors = [], []
+    agent.response_ready.connect(replies.append)
+    agent.error.connect(errors.append)
+    agent.ask("ping", screenshot=False)
+    assert spin(qapp, lambda: replies or errors), "no outcome from flaky client"
+    assert not errors and len(calls) == 2        # exactly one retry after the blip
+    assert replies[0] == "recovered"
+
+
+def test_non_transient_error_is_not_retried(qapp, agent):
+    calls = []
+
+    class _SemanticCompletions:
+        def create(self, **kwargs):
+            calls.append(1)
+            raise ValueError("model not found")   # 4xx-class semantic error → no retry point
+
+    agent._client = SimpleNamespace(chat=SimpleNamespace(completions=_SemanticCompletions()))
+    errors = []
+    agent.error.connect(errors.append)
+    agent.ask("ping", screenshot=False)
+    assert spin(qapp, lambda: errors), "error never surfaced"
+    assert len(calls) == 1                       # single attempt only
+
+
+def test_max_tokens_passed_to_client(qapp, agent):
+    seen = {}
+
+    class _SpyCompletions:
+        def create(self, **kwargs):
+            seen.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="ok"))])
+
+    agent._client = SimpleNamespace(chat=SimpleNamespace(completions=_SpyCompletions()))
+    replies = []
+    agent.response_ready.connect(replies.append)
+    agent.ask("ping", screenshot=False)
+    assert spin(qapp, lambda: replies), "no reply"
+    assert seen.get("max_tokens") == 4096        # default cap from config

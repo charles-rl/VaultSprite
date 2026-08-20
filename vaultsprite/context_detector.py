@@ -34,24 +34,48 @@ except (ImportError, NotImplementedError) as exc:  # pragma: no cover - platform
     _pwc = None
 
 
-def default_title_probe() -> str:
-    """Return the current foreground window title ('' when none/unavailable)."""
-    if _pwc is None:
+def default_title_probe():
+    """Foreground-window probe for the detector's poll loop.
+
+    Platform contract (the detector normalizes any of these shapes):
+      * Windows — ``(hwnd, title, app_name)``; ``app_name`` is the real exe name
+        resolved from the window PID via pywinctl/WMI, so a browser tab titled with a
+        'work' word can't outvote the fact that it's chrome.exe.
+      * elsewhere / no probe — plain ``""`` (legacy title-only shape; test probes may
+        also inject either a bare title string or ``(title, app)`` pairs)."""
+    if _pwc is None or sys.platform != "win32":
         return ""
     try:
-        return _pwc.getActiveWindowTitle() or ""
+        win = _pwc.getActiveWindow()
     except Exception as exc:  # probe must never kill the poller thread
-        logger.debug("title probe failed: %s", exc)
-        return ""
+        logger.debug("active window probe failed: %s", exc)
+        return "", "", 0
+    if not win:
+        return "", "", 0
+    try:
+        title = (win.title or "").strip()
+    except Exception as exc:
+        logger.debug("title read failed: %s", exc)
+        title = ""
+    try:
+        app = str(win.getAppName() or "").strip()   # WMI PID→exe name; fine at 5 s cadence
+    except Exception as exc:
+        logger.debug("app-name probe failed: %s", exc)
+        app = ""
+    try:
+        hwnd = int(win.getHandle() or 0)
+    except Exception:
+        hwnd = 0
+    return (hwnd, title, app)
 
 
 class ContextDetector(QObject):
-    """5-second foreground-title poller with keyword classification."""
+    """5-second foreground-window poller: app-name buckets + title-keyword classification."""
 
     context_changed = Signal(str)   # "WORK" | "PLAY" | "UNKNOWN"
 
     def __init__(self, config: Union[Config, None] = None,
-                 probe: Optional[Callable[[], str]] = None):
+                 probe: Optional[Callable] = None):
         super().__init__()
         self.config = config or load_config()
         section = self.config.section("context")
@@ -61,17 +85,69 @@ class ContextDetector(QObject):
         # unclassified app the context would stick forever ("always switched to work")
         self._unknown_decay_polls = int(section.get("unknown_decay_polls", 6))
         self.work_keywords: list[str] = [str(k).lower() for k in
-                                          section.get("work_keywords", [])]
+                                           section.get("work_keywords", [])]
         self.play_keywords: list[str] = [str(k).lower() for k in
-                                          section.get("play_keywords", [])]
+                                           section.get("play_keywords", [])]
+        # app-name channel (Windows only, filled by the default probe): exact exe-name
+        # buckets win over title keywords — chrome.exe is PLAY whatever the tab says.
+        self.work_apps: list[str] = [str(a).lower() for a in
+                                     section.get("work_apps", []) or []]
+        self.play_apps: list[str] = [str(a).lower() for a in
+                                     section.get("play_apps", []) or []]
         # test seam + fallback probe
-        self._probe: Callable[[], str] = probe or default_title_probe
+        self._probe: Callable = probe or default_title_probe
+        # the pet's own overlay HWND (App wires it); when our window briefly holds the
+        # foreground we must not classify ourselves as some unknown app.
+        self._own_winid: int = 0
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._current = CONTEXT_UNKNOWN
         self._unknown_streak = 0
         self.last_title: str = ""      # last raw foreground title (debug/vision prompts)
+
+    def set_overlay_winid(self, winid):
+        """App wiring: our own window id so the probe can filter it out."""
+        try:
+            self._own_winid = int(winid or 0) & 0xFFFFFFFF
+        except (TypeError, ValueError):
+            self._own_winid = 0
+
+    # -- probe normalization -----------------------------------------------------
+    @staticmethod
+    def _read_probe_context(raw) -> tuple[str, str]:
+        """Normalize a probe result to ``(title, app_name)``.
+
+        Accepts every shape in use: bare title string (legacy/test probes),
+        ``("", "")`` off-Windows, 2-tuples from injected tests, and the real Windows
+        3-tuple ``(hwnd, title, app)``."""
+        if isinstance(raw, str):
+            return (raw or ""), ""
+        try:
+            seq = list(raw)
+        except TypeError:               # anything uniterable → treat as no context
+            return "", ""
+        if len(seq) == 3 and not isinstance(seq[0], str):   # Windows shape: (hwnd, title, app) — hwnd first
+            return (((seq[1] or "").strip() if isinstance(seq[1], str) else ""),
+                    ((seq[2] or "").strip() if isinstance(seq[2], str) else ""))
+        if len(seq) >= 2:               # legacy 2-tuple (title, app?)
+            t = seq[0] if isinstance(seq[0], str) else ""
+            a = seq[1] if isinstance(seq[1], str) else ""
+            return (t or "").strip(), (a or "").strip()
+        return "", ""
+
+    def _poll_probe(self):
+        """One probe call, normalized; returns ``None`` when the pet itself is foreground."""
+        try:
+            raw = self._probe()
+        except Exception as exc:
+            logger.debug("probe raised %s", exc)
+            return ("", "")
+        title, app = self._read_probe_context(raw)
+        if (self._own_winid and isinstance(raw, tuple) and len(raw) == 3
+                and (int(raw[0] or 0) & 0xFFFFFFFF) == self._own_winid):
+            return None                 # we are the foreground window → ignore this poll
+        return (title, app)
 
     # -- classification (pure, unit-testable) ----------------------------------
     @staticmethod
@@ -94,13 +170,26 @@ class ContextDetector(QObject):
                 return True
             start = i + 1
 
-    def classify(self, title: str) -> Optional[str]:
-        """Whole-word keyword classification.
+    def classify(self, title: str = "", app_name: str = "") -> Optional[str]:
+        """Classify a foreground window into WORK/PLAY or ``None``.
 
-        Returns WORK/PLAY on a hit, ``None`` when no bucket matches (incl. empty
-        titles). Unknown apps don't clear the last-known bucket immediately — after
-        ``context.unknown_decay_polls`` consecutive unknown polls the poller emits
-        UNKNOWN instead of sticking to the old bucket forever."""
+        Channel 1 (Windows): the real exe/app NAME wins — exact bucket match on
+        ``context.work_apps`` / ``context.play_apps``, so chrome.exe is PLAY regardless of
+        what its tab title says (title keywords can't outvote the process). Channel 2:
+        whole-word keywords over the window TITLE — still authoritative wherever no app
+        name is available (non-Windows, unresolvable process). Returns None when nothing
+        matches (incl. empty input); unknown apps don't clear the last-known bucket
+        immediately — after ``context.unknown_decay_polls`` consecutive unknown polls the
+        poller emits UNKNOWN instead of sticking to the old bucket forever."""
+        app = (app_name or "").strip().lower()
+        if app:
+            base = app[:-4] if app.endswith(".exe") else app
+            for name in self.work_apps:
+                if name == app or name == base:
+                    return CONTEXT_WORK
+            for name in self.play_apps:
+                if name == app or name == base:
+                    return CONTEXT_PLAY
         low = (title or "").lower()
         if not low.strip():
             return None
@@ -123,8 +212,14 @@ class ContextDetector(QObject):
 
     def stop(self):
         self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)
+        # Only drop the reference once the thread is actually gone. If a probe call is
+        # hung past the join timeout, keeping `_thread` set means start()'s liveness guard
+        # refuses to spawn a SECOND poller on top of the stuck one (the old code nulled it
+        # unconditionally → stop/start cycles could accumulate runaway threads).
+        if t is None or not t.is_alive():
             self._thread = None
 
     @property
@@ -138,38 +233,46 @@ class ContextDetector(QObject):
     # -- poll loop ---------------------------------------------------------------
     def _run(self):
         while not self._stop_event.is_set():
-            try:
-                title = (self._probe() or "")
-            except Exception as exc:
-                logger.debug("probe raised %s", exc)
-                title = ""
-            self._maybe_change(title)
+            ctx = self._poll_probe()       # (title, app) or None (we are foreground)
+            if ctx is not None:
+                self._maybe_change(ctx[0], ctx[1])
             self._stop_event.wait(self._poll_ms / 1000.0)
 
-    def _maybe_change(self, title: str):
+    def _emit_context(self, context: str):
+        """Emit on a real change — safe from the worker thread mid-teardown.
+
+        The poller runs in a daemon thread; emitting after App has destroyed us raises
+        RuntimeError (or worse). Check the stop flag and swallow teardown errors so a
+        shutdown race can never surface as an exception in a non-GUI thread."""
+        if self._stop_event.is_set():
+            return
+        try:
+            self.context_changed.emit(context)   # queued across threads
+        except RuntimeError as exc:              # pragma: no cover - QObject deleted
+            logger.debug("context emit failed during teardown: %s", exc)
+
+    def _maybe_change(self, title: str, app_name: str = ""):
         self.last_title = (title or "").strip()     # kept for vision prompts + debug trail
-        context = self.classify(title)
+        context = self.classify(title, app_name)
         if context is None:      # unknown app → hold, then decay after N consecutive polls
             self._unknown_streak += 1
             if self._current != CONTEXT_UNKNOWN and \
                     self._unknown_streak >= self._unknown_decay_polls:
                 logger.info("context change: %s -> UNKNOWN (%d unknown polls; title=%r)",
-                            self._current, self._unknown_streak, title[:60])
+                            self._current, self._unknown_streak, (title or "")[:60])
                 self._current = CONTEXT_UNKNOWN     # stop assuming the old bucket forever
-                self.context_changed.emit(CONTEXT_UNKNOWN)   # queued across threads
+                self._emit_context(CONTEXT_UNKNOWN)
             return
         self._unknown_streak = 0
         if context != self._current:
-            logger.info("context change: %s -> %s (title=%r)",
-                        self._current, context, title[:60])
+            logger.info("context change: %s -> %s (title=%r app=%r)",
+                        self._current, context, (title or "")[:60], (app_name or "")[:40])
             self._current = context
-            self.context_changed.emit(context)   # queued across threads
+            self._emit_context(context)
 
     def poll_once(self):
         """Run a single poll cycle synchronously (tests, one-shot diagnostics)."""
-        try:
-            title = (self._probe() or "")
-        except Exception:
-            title = ""
-        self._maybe_change(title)
+        ctx = self._poll_probe()
+        if ctx is not None:
+            self._maybe_change(ctx[0], ctx[1])
         return self._current

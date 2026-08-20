@@ -30,6 +30,8 @@ stats:
   bounds: [0, 100]
   critical: { hunger: 25, energy: 20, boredom: 80 }        # edge-triggered signals on crossing
   pause_when_inactive: true      # decay only while ContextDetector reports WORK
+  persist: true                  # save/restore stat values across launches (DyberPet idiom; atomic JSON, corrupt-tolerant)
+  state_path: "state/stats.json" # snapshot location — deliberately OUTSIDE the Obsidian vault
 
 physics:
   tick_ms: 30
@@ -48,6 +50,11 @@ context:
   # "visual studio" + "studio code" cover both VS Code and VSCodium-style titles.
   work_keywords: [vs code, visual studio, studio code, terminal, obsidian, pycharm, intellij, sublime, notepad++, word, excel, slack, teams]
   play_keywords: [youtube, steam, reddit, netflix, twitch, discord, spotify, chrome]
+  # Windows-only process channel (filled from the foreground window's exe name via WMI):
+  # an EXACT app-name match wins over title keywords — so chrome.exe with a "docs" tab is
+  # still PLAY. Entries are lowercase names WITH or WITHOUT .exe. Empty = disabled.
+  work_apps: [code, msedge]        # editor / browser used for work tabs
+  play_apps: [chrome, steam]       # browsers / clients that should count as play no matter the tab title
 
 remote:
   ollama_base_url: https://my-ollama-server-11434.jpe1.devtunnels.ms/v1   # OpenAI-compatible; append /chat/completions
@@ -60,6 +67,8 @@ remote:
     quality: 80          # JPEG quality (smaller payload than koishi's 95)
     format: jpeg
   ask_interval_ms: 300000     # autonomous vision cadence; 0 disables the loop
+  fallback_line: "Sorry — I can't see clearly right now."   # shown when an LLM call fails/times out instead of leaving a dangling 'Thinking…' bubble
+  vision_fail_cooldown_s: 300   # after any failed LLM call, autonomous asks pause this long (stop hammering a dead server)
   system_prompt: >-
     You are VaultSprite, a small desktop mascot that watches your screen.
     Reply in one short sentence (max 25 words). Reference what you actually see.
@@ -76,6 +85,9 @@ obsidian:
 health:
   work_threshold_min: 50     # continuous WORK minutes before a stretch nudge (outline: 45-60)
   nudge_tick_ms: 5000        # WorkTimer tick cadence
+  use_os_idle: true          # gate "continuous work" on real OS input (Windows GetLastInputInfo; inactive elsewhere)
+  afk_cutoff_s: 30           # after this many seconds without keyboard/mouse input, banked work-time resets (StretchBreak's frame-drop cutoff port)
+  yawn_cooldown_s: 300       # min seconds between yawn SFX when the pet enters a lying-down/resting behavior (M8 doc §5.4: sleeping→yawn once)
   volume: { step: 0.7, chirp: 1.0, yawn: 0.8 }
   sounds_dir: assets/sounds
 

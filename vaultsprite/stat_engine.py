@@ -8,8 +8,10 @@ decay pauses in PLAY/UNKNOWN contexts.
 """
 from __future__ import annotations
 
+import json
 import logging
 from enum import Enum
+from pathlib import Path
 from typing import Any, Mapping, Union
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -17,6 +19,38 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .config import Config, load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_json(path: "Path | str", obj: dict) -> None:
+    """Best-effort atomic JSON write (dot-temp + rename), never raises.
+
+    Deliberately independent of M7's vault writer: this is the engine's own scratch
+    state, not Obsidian memory — so no sandbox guard applies here and a full disk can
+    at most lose this session's stats, never crash the pet."""
+    p = Path(path)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f".{p.name}.tmp")
+        tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as exc:  # noqa: BLE001 - persistence is best-effort by contract
+        logger.debug("stat state write failed (%s): %s", p, exc)
+
+
+def _load_stat_state(path: "Path | str") -> dict[str, int] | None:
+    """Read a prior stat snapshot keyed by StatKind value.
+
+    Returns {} on a missing file (first launch), the loaded values when valid, and None
+    when corrupt/unusable — callers then fall back to config initial values."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        return {k.value: int(raw[k.value]) for k in StatKind}   # raises on any bad key/value
+    except Exception as exc:  # noqa: BLE001 - corrupt file tolerated (DyberPet idiom)
+        logger.warning("stat state %s unreadable (%s); resetting to config initial", p, exc)
+        return None
 
 
 class StatKind(str, Enum):
@@ -59,8 +93,34 @@ class StatEngine(QObject):
         }
         self.pause_when_inactive = bool(c.get("pause_when_inactive", True))
 
+        # -- cross-launch persistence (config-driven; off by default) ---------------
+        # Snapshot lives at `stats.state_path` — deliberately OUTSIDE the Obsidian vault
+        # so pet memory stays clean engine state, not journal pollution.
+        self.persist_enabled = bool(c.get("persist", False))
+        raw_path = c.get("state_path") or "state/stats.json"
+        self._state_path: Path = (Path(self.config.root) / raw_path
+                                  if not Path(raw_path).is_absolute() else Path(raw_path))
+
         self._values: dict[StatKind, int] = dict(self._initial)
+        loaded = _load_stat_state(self._state_path) if self.persist_enabled else {}
+        if loaded is None:                      # corrupt snapshot → keep config initial
+            pass
+        elif loaded:                            # non-empty → hydrate (clamped to bounds)
+            for k in StatKind:
+                lo, hi = self.bounds[k]
+                v = min(hi, max(lo, int(loaded.get(k.value, self._initial[k]))))
+                if v != self._values[k]:
+                    logger.info("stat %s restored from state file: %d → %d", k.value,
+                                self._values[k], v)
+                    self._values[k] = v
         self._in_critical: dict[StatKind, bool] = {k: False for k in StatKind}
+        # re-arm edge state to the HYDRATED values so a boot straight from a saved
+        # critical stat doesn't fire a spurious threshold signal on the first tick.
+        for k in StatKind:
+            if k in self.critical:
+                thr = self.critical[k]
+                self._in_critical[k] = (self._values[k] < thr) if k in LOW_CRITICAL \
+                    else (self._values[k] > thr)
         self._active = True
         self._paused = False
 
@@ -73,8 +133,17 @@ class StatEngine(QObject):
         if not self._timer.isActive():
             self._timer.start()
 
+    def flush(self):
+        """Persist the current snapshot (graceful shutdown hook; also called on change)."""
+        if self.persist_enabled:
+            _atomic_write_json(
+                self._state_path,
+                {k.value: v for k, v in self._values.items()},
+            )
+
     def stop(self):
         self._timer.stop()
+        self.flush()
 
     @property
     def running(self) -> bool:
@@ -127,20 +196,25 @@ class StatEngine(QObject):
         if changed:
             self.stat_changed.emit(kind.value, new)
             self._evaluate(kind)
+            self.flush()                     # manual changes persist immediately
 
     def _tick(self):
         if self._paused:
             return
         if not self._active and self.pause_when_inactive:
             return
+        changed_any = False
         for kind in StatKind:
             delta = self.decay.get(kind, 0)
             if not delta:
                 continue
             changed, new = self._apply_delta(kind, delta)
             if changed:
+                changed_any = True
                 self.stat_changed.emit(kind.value, new)
             self._evaluate(kind)
+        if changed_any:
+            self.flush()                     # save-on-mutation (DyberPet idiom, atomic here)
 
     def _apply_delta(self, kind: StatKind, delta: int) -> tuple[bool, int]:
         """Apply a clamped change; returns (changed, new_value)."""

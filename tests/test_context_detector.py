@@ -148,8 +148,135 @@ def test_polling_thread_runs_and_stops(detector, titles, qapp):
 def test_linux_no_pwc_still_degrades(qapp):
     """default_title_probe never raises; is_available reflects platform reality."""
     from vaultsprite.context_detector import default_title_probe, _pwc
-    title = default_title_probe()                   # '' on Linux (no probe), a str elsewhere
-    assert isinstance(title, str)
+    raw = default_title_probe()                     # '' on Linux (no probe), a tuple on Windows
+    assert isinstance(raw, (str, tuple))
     if _pwc is None:
         det = ContextDetector(FakeConfig())
         assert not det.is_available()
+
+
+# -- C3: app-name channel wins over title keywords ---------------------------------------
+def test_app_name_bucket_overrides_title(qapp):
+    cfg = FakeConfig({
+        "context.work_apps": ["code", "msedge.exe"],   # .exe tolerated both ways in config
+        "context.play_apps": ["chrome"],
+    })
+    det = ContextDetector(cfg, probe=lambda: ("Chrome — Important Docs Report", "chrome.exe"))
+    assert det.poll_once() == CONTEXT_PLAY            # chrome.exe wins over a 'docs' tab title
+
+    det2 = ContextDetector(FakeConfig(
+        {"context.work_apps": ["code"], "context.play_apps": []}),
+        probe=lambda: ("Visual Studio Code - main.py", ""))   # no app name → title channel still works
+    assert det2.poll_once() == CONTEXT_WORK
+
+
+def test_app_name_no_match_falls_back_to_title(qapp):
+    """Unbucketed exe + keyword-matching title still classifies by title."""
+    cfg = FakeConfig({"context.work_apps": ["code"], "context.play_apps": []})
+    det = ContextDetector(cfg, probe=lambda: ("PyCharm - project", "notepad2.exe"))
+    assert det.poll_once() == CONTEXT_WORK
+
+
+# -- C3: self-window filter — our own overlay never classifies ----------------------------
+def test_own_overlay_window_is_ignored(qapp):
+    cfg = FakeConfig({"context.unknown_decay_polls": 2})
+    box = [None]          # probe result slot, steered per-poll like `titles`
+    det = ContextDetector(cfg, probe=lambda: box[0])
+    det.set_overlay_winid(12345)
+
+    seen = []
+    det.context_changed.connect(lambda c: seen.append(c))
+
+    det._maybe_change("Steam - Store", "")           # baseline bucket via the normal path
+    assert seen == [CONTEXT_PLAY]
+
+    box[0] = (12345, "Our Pet Overlay Title", "")     # WE are the foreground window
+    det.poll_once()                                  # must be a no-op poll (None probe result)
+    assert seen == [CONTEXT_PLAY], f"own overlay leaked into classification: {seen}"
+
+    box[0] = (99999, "Steam - Store", "")            # someone else → normal handling resumes
+    det.poll_once()
+    assert seen == [CONTEXT_PLAY]                    # same bucket, no re-emit; no UNKNOWN decay either
+
+
+# -- C3: probe-shape normalization ----------------------------------------------------------
+def test_probe_shapes_normalize(qapp):
+    from vaultsprite.context_detector import ContextDetector as CD
+
+    # legacy string probes (all pre-existing tests), bare "", 2-tuple, Windows 3-tuple, junk
+    assert CD._read_probe_context("Bare title") == ("Bare title", "")
+    assert CD._read_probe_context("") == ("", "")
+    assert CD._read_probe_context(("Some App", "someapp.exe")) == ("Some App", "someapp.exe")
+    assert CD._read_probe_context((42, "Win Title", "win.exe")) == ("Win Title", "win.exe")
+    assert CD._read_probe_context(None) == ("", "")
+
+
+# -- A4: teardown race — a stuck probe must not let stop/start double-spawn the poller ------
+def _wait_thread_alive(det, qapp_, timeout=2.0):
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        t = det._thread
+        if t is not None and t.is_alive():
+            return True
+        qapp_.processEvents()
+        _t.sleep(0.01)
+    return False
+
+
+def test_stop_with_hung_probe_keeps_reference(qapp):
+    """stop() joins for 2s; a probe stuck past that must NOT have its reference nulled,
+    or start() would spawn a SECOND poller on top of the stuck one."""
+    import threading as _threading
+
+    released = _threading.Event()
+
+    def blocking_probe():
+        assert not released.wait(timeout=5.0), "probe never unblocked"
+        return ""
+
+    det = ContextDetector(FakeConfig({"context.poll_ms": 30}), probe=blocking_probe)
+    det.start()
+    assert _wait_thread_alive(det, qapp), "poller thread never came alive"
+    # the thread is inside blocking_probe(); stop()'s join times out…
+    det.stop()
+    assert det._thread is not None, \
+        "stuck-thread reference dropped while still alive → double-spawn possible"
+    released.set()                          # let it finish; stop_event set → loop exits
+    time.sleep(0.2)
+
+
+def test_start_refuses_second_poller_while_first_alive(qapp):
+    import threading as _threading
+
+    stuck = _threading.Event()
+
+    def blocking_probe():
+        assert not stuck.wait(timeout=5.0), "probe never unblocked"
+        return ""
+
+    det = ContextDetector(FakeConfig({"context.poll_ms": 30}), probe=blocking_probe)
+    det.start()
+    assert _wait_thread_alive(det, qapp), "poller thread never came alive"
+    first = det._thread
+
+    det.start()                             # must be a no-op: guard sees the live thread
+    time.sleep(0.25)
+    pollers = [t for t in _threading.enumerate() if t.name == "context-detector"]
+    assert len(pollers) == 1, f"expected exactly one poller, found {len(pollers)}"
+
+    stuck.set(); time.sleep(0.2)            # unstick + let the thread exit its loop
+    det.stop()
+
+
+def test_emit_context_silenced_after_stop(qapp):
+    """A change detected mid-teardown must not emit after stop()."""
+    cfg = FakeConfig({"context.poll_ms": 30})
+    box = ["Steam - Store"]
+    det = ContextDetector(cfg, probe=lambda: box[0])
+    seen = []
+    det.context_changed.connect(lambda c: seen.append(c))
+
+    det.stop()                                             # stop first…
+    det._maybe_change("PyCharm - x")                       # …then a stray poll tries to report
+    assert seen == [], f"emitted after stop(): {seen}"

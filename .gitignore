@@ -12,3 +12,6 @@ crash/
 
 # Local vault (memory writes during dev runs) — the app creates it at runtime
 Vault/
+
+# M3 stat persistence snapshot (local engine state; never committed)
+state/

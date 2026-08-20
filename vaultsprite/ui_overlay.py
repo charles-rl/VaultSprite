@@ -252,7 +252,7 @@ class TelemetryOverlay(QWidget):
         self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._label.setStyleSheet("padding: 8px;")
         lay.addWidget(self._label)
-        self.setFixedSize(260, 84)
+        self.setFixedSize(260, 84)         # grows to fit the stat rows on first refresh (T2)
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.refresh)
@@ -270,10 +270,21 @@ class TelemetryOverlay(QWidget):
         if g is None:
             return
         d = g()
-        text = (f"pos=({d.get('x', 0)},{d.get('y', 0)})\n"
-                f"behavior={d.get('behavior', '')}\n"
-                f"frame={d.get('frame', '')}")
+        lines = [f"pos=({d.get('x', 0)},{d.get('y', 0)})",
+                 f"behavior={d.get('behavior', '')}",
+                 f"frame={d.get('frame', '')}"]
+        # T2: live stat values, present whenever the getter supplies them (stats are always
+        # built in App); keep this loop generic so extra fields can appear for free.
+        stats = sorted((k[len("stat_"):], v) for k, v in d.items() if str(k).startswith("stat_"))
+        if stats:
+            lines.append(" | ".join(f"{name}={val}" for name, val in stats))
+        text = "\n".join(lines)
         self._label.setText(text)
+        # one extra row of monospace 10px ≈ 28px (pad-inclusive); re-size only on change so the
+        # window never thrashes geometry every 500 ms tick.
+        want_h = 84 + (28 if stats else 0)
+        if self.height() != want_h:
+            self.setFixedSize(self.width(), want_h)
 
     def closeEvent(self, event):  # noqa: N802
         self._timer.stop()

@@ -41,10 +41,44 @@ except ImportError as exc:  # pragma: no cover - platform gate (needs X11/DXGI)
 
 try:
     import httpx
-    from openai import OpenAI
+    from openai import (OpenAI, APIConnectionError, APITimeoutError, InternalServerError,
+                        RateLimitError)
 except ImportError as exc:  # pragma: no cover
     logger.debug("openai/httpx unavailable (%s); agent disabled", exc)
     OpenAI = None
+
+
+def _transient_llm_errors() -> tuple[type[Exception], ...]:
+    """Exception types worth ONE retry after a backoff — transport-level blips only.
+
+    Resolved lazily (per call) so the module stays importable and test-stubbable whether
+    or not the openai SDK is present/complete: any name this SDK build doesn't export is
+    skipped, an absent SDK yields () → single-attempt behavior, identical to before."""
+    if OpenAI is None:
+        return ()
+    try:
+        from openai import MaxRetriesExceededError     # not exported by every SDK version
+    except ImportError:
+        MaxRetriesExceededError = None
+    candidates = (APIConnectionError, APITimeoutError, InternalServerError,
+                  RateLimitError, MaxRetriesExceededError)
+    return tuple(t for t in candidates if t is not None)
+
+
+def _retryable_error(exc: BaseException) -> bool:
+    """True when a failed LLM call is worth one retry after a backoff.
+
+    Prefers the SDK's own transport-level exception set; falls back to httpx's
+    ``TransportError`` (the base class of APIConnectionError) so a partial/oddly-named
+    SDK build still retries connection blips instead of silently going single-attempt."""
+    transient = _transient_llm_errors()
+    if transient and isinstance(exc, transient):
+        return True
+    try:
+        import httpx as _httpx
+        return bool(_httpx) and isinstance(exc, _httpx.TransportError)
+    except Exception:  # pragma: no cover - httpx is a hard dep
+        return False
 
 
 class _BrainThread(QThread):
@@ -52,7 +86,7 @@ class _BrainThread(QThread):
 
     Subclassing ``QThread`` and overriding ``run()`` is the robust way to do this here:
     ``run()`` always executes in the new OS thread, so the whole blocking capture + LLM
-    call genuinely runs off the GUI thread. The ``finished``/``error`` signals are emitted
+    call genuinely runs off the GUI thread. The ``result``/``error`` signals are emitted
     from that worker thread and delivered back to the GUI thread via queued connections
     (the receiver lives in the main thread, which runs ``app.exec()``).
 
@@ -62,9 +96,15 @@ class _BrainThread(QThread):
       whole blocking ``fn`` — on the **GUI** thread.
     - ``thread.started.connect(worker.start)`` (bound slot + ``moveToThread``) never ran
       reliably without a worker-thread event loop, so replies were silently lost.
+
+    NOTE: the custom signal is named ``result``, NOT ``finished`` — shadowing Qt's built-in
+    no-arg ``QThread.finished()`` broke the cleanup connection (``thread.finished.connect(
+    thread.deleteLater)``), which only ran on the success path and leaked one QThread per
+    failed request. The built-in ``finished`` signal fires post-run in every case, so it is
+    the single place worker threads get deleted (see ``RemoteAgent.ask``).
     """
 
-    finished = Signal(object)
+    result = Signal(object)
     error = Signal(str)
 
     def __init__(self, fn: Callable[[], object], parent: Optional[QObject] = None):
@@ -73,7 +113,7 @@ class _BrainThread(QThread):
 
     def run(self):
         try:
-            self.finished.emit(self._fn())
+            self.result.emit(self._fn())
         except Exception as exc:  # noqa: BLE001 - surfaced on `error` signal
             logger.exception("brain worker failed")
             self.error.emit(str(exc))
@@ -96,6 +136,7 @@ class RemoteAgent(QObject):
             "ollama_model", "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"))
         timeout = float(c.get("llm_timeout_s", 120))   # generous for a remote H100
         self.vision_enabled = bool(c.get("vision_enabled", True))
+        self._max_tokens = int(c.get("max_tokens", 4096))   # cap generation length (koishi parity)
 
         shot = c.get("screenshot", {}) or {}
         self._max_w = int(shot.get("max_w", 1024))
@@ -109,6 +150,10 @@ class RemoteAgent(QObject):
         )).strip()
         # the pet's own winId, so we never screenshot ourselves (set by main)
         self._overlay_winid: Optional[object] = None
+
+        # -- request tracking (every access on the GUI thread; workers only emit) ---
+        self._in_flight = False       # one concurrent ask max; extra asks are dropped
+        self.last_error_at = 0.0      # monotonic() of last failed call (autonomous-loop cooldown gate)
 
         client = None
         if OpenAI is not None:
@@ -204,16 +249,39 @@ class RemoteAgent(QObject):
     # --------------------------------------------------------------------------
     # async dispatch (sync openai SDK in a per-call QThread) — fire & forget
     # --------------------------------------------------------------------------
+    @property
+    def in_flight(self) -> bool:
+        """True while a dispatched ask has not been delivered yet (either outcome)."""
+        return self._in_flight
+
+    def cancel_inflight(self):
+        """GUI-thread escape hatch for App's watchdog timeout.
+
+        The worker QThread itself cannot be cancelled safely (it may be inside the SDK),
+        so this only clears the gate; when the late worker finally delivers, its queued
+        signals will simply arrive after App has already moved on and the one-in-flight
+        invariant is restored."""
+        self._in_flight = False
+
     def ask(self, prompt: str, window_context: str = "", screenshot: bool = True):
         """Dispatch a request off-thread; reply arrives via ``response_ready``.
 
         Everything blocking — the self-foreground check, mss capture + resize/encode,
         payload building AND the LLM call — runs inside the per-call QThread worker, so
         ``ask()`` itself returns in microseconds and the GUI never blocks on a slow
-        screen grab or first-inference model load."""
+        screen grab or first-inference model load.
+
+        At most ONE request may be in flight: while an earlier ask has not delivered
+        (success *or* error), further asks are dropped with a log line — otherwise the
+        autonomous tick plus user clicks would stack concurrent 120s LLM calls against
+        a slow or cold-starting remote model."""
         if not self.enabled:
             self.error.emit("LLM client unavailable (openai SDK missing or build failed)")
             return
+        if self._in_flight:
+            logger.debug("vision ask dropped — one already in flight")
+            return
+        self._in_flight = True
 
         def _call() -> str:
             # Diagnostic: confirm the blocking work runs OFF the GUI thread. The GUI thread
@@ -229,26 +297,55 @@ class RemoteAgent(QObject):
                 take_shot = False
             messages = self.build_messages(prompt, window_context=window_context,
                                            screenshot=take_shot)
-            resp = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.7,
-            )
+            # One retry after a short backoff on TRANSPORT-level failures only (dead
+            # connection / DNS blip / timeout — the dev-tunnel class of hiccups). Semantic
+            # errors (4xx auth/model-not-found) are deterministic: no point re-asking.
+            last_exc: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    resp = self._client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=int(self._max_tokens),   # cap 27B rambles (koishi parity)
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    if not _retryable_error(exc) or attempt == 1:
+                        raise   # semantic errors (4xx class) and exhausted retry → surface once
+                    logger.warning("LLM transport error (%s); retrying once", type(exc).__name__)
+                    time.sleep(2.0)
+            assert last_exc is None   # loop only exits via break or raise
             text = (resp.choices[0].message.content or "").strip()
             logger.info("vision worker done thread=%s in %.1fs (%d chars)",
                         threading.get_ident(), time.monotonic() - t0, len(text))
             return text
 
         thread = _BrainThread(_call, parent=self)
-        thread.finished.connect(lambda text: self._deliver(text, thread))
-        thread.error.connect(
-            lambda msg: (logger.warning("LLM request failed: %s", msg),
-                         self.error.emit(msg))
-        )
+        thread.result.connect(self._deliver)               # queued to the GUI thread
+        thread.error.connect(self._on_worker_error)        # queued to the GUI thread
+        # built-in (no-arg) finished — fires post-run in EVERY case, success or failure.
+        # This is the single cleanup point: deleting here means no failed request leaks a
+        # QThread (the old custom-shadowed `finished` only connected _deliver on success).
+        thread.finished.connect(thread.deleteLater)
         thread.start()
 
-    def _deliver(self, text: str, thread: QThread):
+    def _on_worker_error(self, msg: str):
+        """Worker exception surfaced off-thread: log + re-emit as our public error."""
+        logger.warning("LLM request failed: %s", msg)
+        self.last_error_at = time.monotonic()
+        try:
+            self.error.emit(msg)
+        except RuntimeError as exc:       # teardown race: QObject already deleted
+            logger.debug("error emit failed: %s", exc)
+        finally:
+            self._in_flight = False
+
+    def _deliver(self, text: str):
         logger.info("LLM reply (%d chars): %r", len(text), text[:120])
-        self.response_ready.emit(text)
-        thread.quit()
-        thread.deleteLater()
+        self._in_flight = False
+        try:
+            self.response_ready.emit(text)
+        except RuntimeError as exc:       # teardown race: QObject already deleted
+            logger.debug("response emit failed: %s", exc)

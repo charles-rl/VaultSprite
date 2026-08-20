@@ -107,9 +107,10 @@ TerrainPhysics                            App
   landed(x,y) ────────────────────────► fsm.force_state("idle")         [same guard]
   standing_lost(title) ───────────────► log (Windows standee lifecycle; inert on Linux)
 
-StatEngine                                App
-  stat_changed(kind,val)               → (not wired to UI yet — introspection only)
-  signal_hungry/tired/bored ──────────► bubble line + vault.append_journal + vault.write_fact
+ StatEngine                                App
+   stat_changed(kind,val)               → value source for the telemetry inspector's stat row (T2, 2026-08-20:
+                                            read via stats.stats() in _mascot_telemetry; signal still has no slot — fine)
+   signal_hungry/tired/bored ──────────► bubble line + vault.append_journal + vault.write_fact
 
 ContextDetector                           App
    context_changed(WORK|PLAY|UNKNOWN) ─► WORK activates stats+health; PLAY and decayed-UNKNOWN
@@ -297,8 +298,11 @@ no-op on Windows (guarded by `os.name != "nt"`).
   The OpenAI-compat payload is model-agnostic, so no other code changes were needed; tests pin the
   new id via FakeConfig/real-config layers (see `test_remote_agent.py`).
 - **Autonomous loop** lives in App (not RemoteAgent): QTimer at `remote.ask_interval_ms` (default
-  300000 ms = 5 min), starts only when >0 AND `agent.enabled`. If the H100 is unreachable you get a
-  repeating log line "vision note: …" — there's no backoff/retry yet.
+  300000 ms = 5 min), starts only when >0 AND `agent.enabled`. Failure handling (2026-08-20 pass): one
+  transport-level retry with 2 s backoff inside the worker, a watchdog that releases the in-flight gate +
+  shows `remote.fallback_line` on hang/failure (no dangling "Thinking…"), and autonomous asks skip while
+  inside `remote.vision_fail_cooldown_s` of the last failure — so an unreachable H100 degrades to a quiet
+  cooldown, not a log spam.
 
 ### M7 obsidian_vault
 - Paths under vault root (config `obsidian.vault_root`, env `VAULT_ROOT`): facts →
@@ -349,11 +353,13 @@ no-op on Windows (guarded by `os.name != "nt"`).
   time (tick length, 5 s). Tests set it to e.g. 100 so the 45–60 min threshold fires in ~2 ticks.
   It's read from the section dict directly; FakeConfig overrides feed it cleanly. Don't remove it —
   nothing else makes the threshold testable without waiting an hour.
-- Nudge lifecycle: counter accumulates only while active (WORK context); at threshold it zeroes,
-  sets `nudge_pending` (which blocks re-fire), and emits once. **Nothing auto-clears
-  `nudge_pending`** — you must call `resolve_nudge(mode)` or the pet stays nudged forever. main.py
-  does NOT currently wire a dismissal path: right-click "Stretch break" fires a *new* nudge only if
-  not pending, and the real trigger just re-arms after resolution. **This is a known gap** (see §5).
+ - Nudge lifecycle: counter accumulates only while active (WORK context); at threshold it zeroes,
+   sets `nudge_pending` (which blocks re-fire), and emits once. Dismissal WAS a gap — **wired 2026-08-20**:
+   pet click while pending → `resolve_nudge("stretch")`, tray "Dismiss" (its previously-dead signal) →
+   `"postpone"` (25-min partial credit back), leaving WORK in `_on_context_changed` clears App's flag in
+   lockstep with the timer's own cancel. Right-click "Stretch break" still fires a *new* nudge only if
+   not pending — intentional (it's an explicit ask, not a dismissal). The Windows OS-idle gate (2026-08-20)
+   additionally zeroes banked work after `afk_cutoff_s` with no input before crediting the tick.
 - `SoundBank` fully no-ops when pygame or the mixer fails to init (headless box: it logs "audio
   disabled" once at startup — that line in smoke output is expected, not an error). `play/stop/
   play_loop` never raise regardless.
@@ -391,7 +397,11 @@ no-op on Windows (guarded by `os.name != "nt"`).
   `set_tracked_window(...)` (logical px; the caller divides Win32 px by `devicePixelRatio()`). App
   does not yet supply a foreground-window rect — see §4/§9 2026-08-18 pass. A pixmap
   cache decodes the single PNG frames this PySide6 build reads reliably; the sprite is mirrored
-  by `looking_right`. `debug.telemetry_overlay` drives an on-screen inspector; `debug.vault_logging`
+  by `looking_right`. `_DraggableAction` (the Dragged/Pinched sway) forces `looking_right=False`
+  on every step — a verbatim port of C++ `Dragged.tick()`'s `setLookRight(false)`: the Pinched
+  lean frames are authored for the LEFT-facing sprite in world space, so mirroring them during a
+  right-facing drag played the sway backwards (user-reported; fixed 2026-08-20). Releasing
+  re-syncs facing from throw velocity via `FallAction`. `debug.telemetry_overlay` drives an on-screen inspector; `debug.vault_logging`
   (default true) writes the telemetry via `append_debug_log` to `Memory/Debug/mascot-<day>.md`.
   `QSystemTrayIcon` manager: global scale, behavior toggles (exclude-by-name), dismiss/quit.
 - **Pack bug fixed:** `assets/steve_shimeji/conf/actions.xml` L449/539 had `Math.random*100`
@@ -408,37 +418,102 @@ no-op on Windows (guarded by `os.name != "nt"`).
 
 ## 4. Known gaps / TODOs for whoever's next (in priority order)
 
-1. **M9 mascot engine is now wired into App/UI** (see §3-M9; done 2026-08-17): `MascotEngine`
-   QTimer at `mascot.tick_ms: 40` drives `core.tick()` with a fresh env snapshot each tick; App
-   forces external behaviors via `force_behavior("Dragged"/"Thrown"/…)` (App stays sole owner of
-   *external* forces); single-read `QImageReader().read()` pixmap cache in the UI layer; behavior/
-   pose signals let App log to the Vault, play sounds and force "talking". The running pet now
-   renders `img/Steve/shime*.png` through the engine (old generated GIF sprites superseded). No
-   audio files exist in the pack — keep the synthesized SFX.
-2. **On-screen telemetry window** — built (2026-08-17): `debug.telemetry_overlay: true` shows a
-   live coords/behavior/frame overlay mirroring Shimeji-Desktop's inspector; `debug.vault_logging:
-   true` (default) writes the same telemetry via `append_debug_log`. Both are config-flippable.
-3. **step.wav and yawn.wav are generated but unwired.** M8 doc §5.4 wants walking→step loop,
-    sleeping→yawn once. Wiring point: in `main.py`, watch state transitions (`player.state_finished`
-    or hook inside `_play`) → `sounds.play_loop("step")` when entering `walking`, stop on exit;
-    `sounds.play("yawn")` once per entry to `sleeping`. Only `chirp` is used today (click + nudge).
-4. **No stat persistence.** Stats reset to config `stats.initial` on restart (DyberPet's
-   `conf.py` PetData port was explicitly optional in M3 §5.6 and skipped). A JSON/YAML sidecar at
-   vault or repo level is the obvious shape if wanted.
-5. **Health-nudge dismissal path** (§3-M8 above): add an overlay hook (click during stretch_nudge,
-   or menu item) → `health.resolve_nudge("stretch"|"skip")`. Postpone semantics exist and are tested.
-6. **Windows-only paths untested**: window-standing + standee liveness, self-screenshot skip,
-   pywinctl polling with a real title source, Shell_TrayWnd (not coded). All guarded; all inert on
-   Linux by design. They need a Windows box to exercise — budget real time there. (The settle-logic
-   bugs that *could* be faked via monkeypatch are now covered — see §3-M4 P2 tests.)
-7. **M9 tracked-window bridge unwired** (2026-08-18): `MascotEngine.set_tracked_window(...)`
-   forwards the rect to `core.update_environment` each tick, but App never supplies one, so
-   `env.active_ie` stays the invisible sentinel and all IE/window-top behavior (IE_STICK landing,
-   `activeIE.*` condition groups, ThrowIE) is dormant. Needs a foreground-window **rect** bridge
-   from App/M5, dividing Win32 px by `devicePixelRatio()`. `ContextDetector` currently exposes only
-   `last_title` (a string), not a rect.
-8. **No LLM backoff**: repeated unreachable-H100 logs each ask_interval (default 5 min). Cheap fix:
-   exponential delay or skip-after-N until context changes.
+1. **Windows-only paths untested**: window-standing + standee liveness, self-screenshot skip,
+   pywinctl polling with a real title source (now including the app-name channel — see §9 2026-08-20),
+   GetLastInputInfo idle gate, Shell_TrayWnd (not coded). All guarded; all inert on Linux by design.
+   They need a Windows box to exercise — budget real time there. (The settle-logic bugs that *could*
+   be faked via monkeypatch are now covered — see §3-M4 P2 tests.)
+
+2. **M9 tracked-window bridge unwired** (flagged 2026-08-18; detailed recipe below — est. half a day):
+   `MascotEngine.set_tracked_window(rect)` forwards the rect into `core.update_environment` each tick,
+   but **App never supplies one**, so `env.active_ie` stays the invisible sentinel and every IE/window
+   behavior in the pack is dormant: SitOnTheLeft/RightEdgeOfIE, ClimbIEWall, JumpFrom*EdgeOfIE,
+   RunAlong/WalkAlongIECeiling, GrabIEBottom*, ThrowIEFromLeft/Right, JumpFromBottomOfIE. The pet can
+   never interact with real windows in mascot mode (window-standing still works legacy-mode only via
+   M4's own `TerrainPhysics._get_visible_windows` — separate code path, don't conflate).
+
+   **Recipe for the implementing agent** (seams verified 2026-08-20):
+   a. **Probe**: extend `ContextDetector`'s default Windows probe to also read the foreground rect:
+      after `_pwc.getActiveWindow()`, take `(win.left, win.top, win.right, win.bottom)` — pywinctl's
+      `Win32Window` exposes all four (physical px, from GetWindowRect; see
+      `docs/05_context_detector/source/_pywinctl_win.py:891-` and `_main.py:268-296`). Return a 4th
+      field (or extend the existing `(hwnd, title, app)` tuple); **update `_read_probe_context()`** to
+      normalize it — keep string/2-tuple test probes working (they must still pass untouched).
+      Publish via a `last_rect` attribute set in `_maybe_change(...)` (same pattern as `last_title`).
+   b. **DPI trap**: Win32 rect = physical px, the engine's env expects logical px — divide all four by
+      `devicePixelRatio()`. Do NOT call Qt screen APIs from the detector's worker thread: have App read
+      the ratio on the GUI thread (and refresh it via `QScreen.devicePixelChanged`) and inject it with
+      a setter in the style of the existing `set_overlay_winid(winid)`; the probe divides by that stored value.
+   c. **Self-exclusion**: when the pet's own overlay is foreground (the probe already returns None for
+      it), App must *clear* the tracked window (`set_tracked_window(None)`) so the engine falls back to
+      the sentinel instead of letting Shimeji climb on its own invisible 89×89 window.
+   d. **App wiring**: in `main.py`, after each context poll change (hook next to `_on_context_changed`),
+      if rect is non-None and not self → `self.mascot.set_tracked_window(rect)`. Legacy mode ignores it
+      entirely (`mascot is None`).
+   e. **Tests on Linux** (only live behavior needs the Windows box): fake-probe 5-tuple through the
+      normalizer; an App-level forwarder test with a stub detector asserting `set_tracked_window` receives
+      DPI-divided logical px and that self-foreground clears to None; engine-side env consumption is
+      already covered by `tests/test_mascot_engine.py`.
+
+3. **Vault → LLM memory read-back NOT implemented** (planned 2026-08-20, deliberately deferred — user
+   decision). Today the Obsidian connection is **one-directional**: App writes to the vault from six call
+   sites (`_stat_nudge` facts+journal, `_on_context_changed` events, `_trigger_stretch_nudge` fact+journal,
+   `_on_agent_reply` journal "said: …", plus `Memory/Debug/*` trails) — and **nothing is ever read back**:
+   `read_fact()` has zero callers and every prompt sent to Ollama is still exactly config system prompt +
+   user question + real foreground title/bucket + downscaled screenshot. The model has amnesia about
+   everything the pet recorded; vault content exists only for a human reading Obsidian.
+
+   **Planned design** (vault-based recall, no new deps, no vector store):
+   - New `MemoryRecaller` class in `obsidian_vault.py` (pure file I/O, no Qt — callable from the
+     RemoteAgent worker thread): walks `Memory/Facts/**` for the N newest notes by `last_updated`
+     (never a full vault walk) + `Memory/Events/<day>/` for only the last `memory_event_days` day-dirs;
+     reuses `_read_markdown()` per note with silent skip on malformed files (atomic writes guarantee no
+     torn reads — readers never see half-files); scores each candidate by token overlap of its
+     summary/title/predicate vs the *current foreground title + prompt text* × recency decay `0.9**age_days`
+     (koishi's "retrieve on window titles only, exclude numeric noise" idea from their context_builder) —
+     and returns a budgeted digest (~1500 chars of `- [fact] …` / `- [event] …` lines), or `""` when the
+     vault is empty so callers degrade silently. Reads are intentionally NOT sandbox-guarded (the
+     `_resolve_safe` contract guards writes only — keep it that way).
+   - Injection: `RemoteAgent.build_messages(..., memory_context="")` appends after the system prompt a
+     `[What you know about this user's world]\n{digest}` block when non-empty; thread through `ask()`;
+     App calls the recaller in one place — `_ask_vision` (both user-triggered and autonomous asks share it)
+     — inside try/except-log like every other best-effort vault call. No signature churn elsewhere: empty
+     string default keeps all existing payload tests byte-identical.
+   - Config keys to add under `remote:`: `memory_recall_enabled: true`, `memory_max_chars: 1500`,
+     `memory_event_days: 2`, `memory_fact_limit: 8`.
+   - Reference anchor: koishi injects `MemoryStore.retrieve_context()` the same way (vendored call sites:
+     `docs/06_remote_agent/source/context_builder.py:217-232`, `pet_agent.py:418-422`), **but the
+     MemoryStore class itself is NOT vendored** — it's an embedding/vector DB, disabled by default in their
+     config (`EMBEDDING_*`). So our keyword+recency ranker is a local design decision, not a port. If you
+     later want semantic retrieval: Ollama already serves OpenAI-compatible `/embeddings` (e.g.
+     nomic-embed-text) — that path needs an index sidecar + maintenance job and was explicitly NOT planned.
+   - **Value note / sequencing**: the recall pool today is thin (stat criticals, context-switch events,
+     stretch facts + journal lines). The loop only gets rich once item 4 below lands; ship read-back first
+     so its plumbing proves itself on existing content.
+
+4. **LLM → vault write-back NOT implemented** (the loop-closer, follow-up to #3): parse a minimal fact
+   line out of LLM replies and persist via `write_fact()`/`record_event()`. Koishi emits structured lines
+   (`Memory: 类别 内容 | keywords:… | importance:1-5 | level:L1/L2/L3` — Chinese-schema-specific, see
+   vendored `prompts.py:10-14`) and saves them via `save_from_line()`; **we must define our own tiny line
+   grammar** (e.g. one English `FACT:` prefix per note), extend the config system prompt with its contract,
+   parse in `_on_agent_reply` before the journal write, and wrap in try/except-log so a malformed reply can
+   never break the vision path. Dedupe: our facts are key-addressed (slugified) by design, so re-writing the
+   same fact just refreshes `last_updated` — no new idempotency machinery needed.
+
+5. **Multi-turn conversation history buffer NOT implemented** (~50 lines, suggested to bundle with #3 but
+   deferred separately): koishi feeds up to 15 time-stamped prior turns (token-budgeted, LLM-summarized when
+   old) between system and user message; minimum viable version = a `collections.deque(maxlen=N)` of the last
+   prompt+reply pairs on App/RemoteAgent with `[HH:MM]` prefixes and a char budget, injected in `build_messages`.
+   Makes consecutive asks less amnesiac independent of vault recall. No I/O, trivially testable via stub client.
+
+Done this cycle (2026-08-20 T-pass): **ambient SFX wired** per M8 doc §5.4 — walking/run behaviors loop
+`step.wav` (stopped on any non-walk state; both M9 behavior names and legacy FSM state names drive it via
+the shared `App._ambient_sounds_for` hook on `_play()` / `behavior_changed`), resting states (`LieDown` in
+mascot mode, `sleeping` in legacy) fire `yawn.wav` once per episode behind a `health.yawn_cooldown_s: 300`
+cooldown; gated off while hidden or during hide-walk. **Telemetry inspector now shows live stat values** —
+the previously-unwired `stat_changed` signal's data (all three stats) feeds the `_mascot_telemetry()` getter,
+which the overlay renders as a fourth row (`hunger=… | energy=… | boredom=…`) with dynamic height.
+
 
 ---
 
@@ -498,12 +573,95 @@ no-op on Windows (guarded by `os.name != "nt"`).
   if imports mysteriously "only work from the repo root", this key got lost. `uv sync --extra dev`.
 - System X libs for offscreen Qt are apt-installed (§1 note). Audio: SDL mixer is unavailable here →
   SoundBank no-op (expected, tested as such).
-- Image files CAN be read by this session's build agent (native image input — confirmed 2026-08-17:
-  it eyeballed `sprite_test.png` and the offscreen renders directly). Visual QA is therefore both
-  numeric (alpha probes over magenta, pixel diffs) **and** direct inspection of
-  `/tmp/vaultsprite_render.png`; no helper scripts or remote-VLM round trips needed for image checks.
+ - Image files CAN be read by this session's build agent (native image input — confirmed 2026-08-17:
+   it eyeballed `sprite_test.png` and the offscreen renders directly). Visual QA is therefore both
+   numeric (alpha probes over magenta, pixel diffs) **and** direct inspection of
+   `/tmp/vaultsprite_render.png`; no helper scripts or remote-VLM round trips needed for image checks.
+ - **SDK drift trap (found 2026-08-20):** the venv's `openai` is **3.1.0** while `uv.lock` pins
+   **2.48.0** — something installed the newer major outside uv (or a re-resolve happened). openai 3.x
+   renamed/dropped some exception names (`MaxRetriesExceededError` is gone), so blind from-imports of
+   SDK symbols fail and `remote_agent.py`'s guard would silently disable the whole client. Code against
+   the SDK defensively (per-name imports + `httpx.TransportError` fallback, as remote_agent now does);
+   if you touch `uv.lock`/deps again, re-verify with `uv run --locked python -c "import openai; print(openai.__version__)"`.
 
 ## 9. Changelog
+
+### 2026-08-20 — T-pass: ambient SFX + telemetry stats wired; memory features scoped for a future agent (177 tests)
+User decision: skip vault→LLM read-back and the M9 tracked-window bridge for now, build only the medium-to-trivial items from the gap list, and record the skipped ones in detail here.
+
+**Shipped:**
+- **Ambient SFX wired per M8 doc §5.4** (was open §4 item): `App._ambient_sounds_for(name)` is the shared
+  hook — walking/run behaviors start a `step.wav` loop (any non-walk name stops it), and resting states
+  (`LieDown` in mascot mode, `sleeping` in legacy) fire one `yawn.wav` behind a new `health.yawn_cooldown_s:
+  300` cooldown. Driven from BOTH funnels so neither mode goes silent: `_play()` for legacy FSM transitions
+  and the (single, moved-up) `_on_mascot_behavior` slot for M9 behavior changes; both gated by `not hidden`
+  **and** `not mascot._hide_walking` so hide/show walks play no footsteps. Behavior→sound mapping is keyword-
+  based on names (`walk`/`run`/`crawl`) so it survives pack swaps. 3 regression tests (loop start/stop, legacy
+  state names, yawn cooldown) stub `App.sounds`.
+- **Telemetry inspector shows live stats** (closes the stale "stat_changed not wired to UI yet" line in §2):
+  `_mascot_telemetry()` now carries `stat_{hunger,energy,boredom}` from `stats.stats()`, and
+  `TelemetryOverlay.refresh` renders a fourth row (`hunger=… | energy=… | boredom=…`) with one-time dynamic
+  height growth (no per-tick geometry thrash). The signal itself has no slot — reading the getter each 500 ms
+  refresh is simpler and equivalent at this cadence. 1 regression test builds a real overlay with the live
+  getter and asserts both stats appear in the label text.
+
+**Documented for future implementation (open §4 items now carry full recipes):** M9 tracked-window bridge —
+the dormant IE/window behaviors are enumerated, the probe seam identified (`getActiveWindow()` rect = win.left/
+top/right/bottom physical px), and a five-step recipe written: extend probe + `_read_probe_context`, divide by
+`devicePixelRatio()` (read on GUI thread, injected like `set_overlay_winid` — never call Qt from the worker
+thread), clear to sentinel when our own overlay is foreground, wire next to `_on_context_changed`, and what's
+unit-testable on Linux vs. Windows-box-only. Vault→LLM read-back — current state explicitly documented as
+**one-directional** (six write call sites; `read_fact()` has zero callers), the planned design recorded
+(`MemoryRecaller` in M7, recency×keyword scoring on window-title tokens per koishi's retrieval idea, budgeted
+digest appended after the system prompt via a new `memory_context=""` arg that keeps every existing payload test
+byte-identical, four config keys), plus the reference caveat: koishi's actual `MemoryStore` class is NOT
+vendored (embedding/vector DB, off by default) so our ranker is a local design decision, and semantic retrieval
+via Ollama `/embeddings` was explicitly scoped out. Loop-closer write-back + multi-turn history buffer recorded
+as follow-ups with their own minimal designs (define our own English `FACT:` line grammar — koishi's is
+Chinese-schema-specific; deque-based history with `[HH:MM]` prefixes).
+
+### 2026-08-20 — Non-visual backend audit pass: P0/P1 feature-parity fixes (DyberPet / PyWinCtl / koishi / SPEC-v4 references, vendored in `docs/*/source/`)
+Line-by-line parity audit of the six backend modules + signal routing; then implementation. 173 tests green, `--smoke` exit 0.
+
+**Shipped (P0 correctness):**
+- **M6 QThread leak** — `_BrainThread` declared a custom `finished = Signal(object)` that shadowed Qt's built-in no-arg `QThread.finished()`; cleanup (`deleteLater`) lived only in the success-path slot, so every failed POST leaked one worker thread. Renamed to `result`; the built-in `finished` now owns cleanup unconditionally (`thread.finished.connect(thread.deleteLater)`, remote_agent.py).
+- **M6 vision error UX** — a failed/timed-out ask used to leave "Thinking…" dangling forever with no in-flight gate (autonomous ticks + clicks could stack concurrent 120s calls). Now: `_in_flight` one-at-a-time gate on `ask()`; single-shot watchdog (`llm_timeout_s + 15`) releases the gate and shows `remote.fallback_line`; late replies after error/timeout are ignored (`App._vision_pending`); autonomous ticks skip while inside `remote.vision_fail_cooldown_s` of the last failure (recorded on both error *and* pure timeout).
+- **M8 stretch-nudge resolution** — `resolve_nudge()` had zero call sites, so after one nudge `_nudge_pending` latched until a context flip. Resolution paths added: pet click while pending → `"stretch"` (full reset); the previously-dead tray `dismiss_requested` signal → `"postpone"` (25-min partial credit back); leaving WORK in `_on_context_changed` clears App's `_stretch_nudge_active` flag in lockstep with WorkTimer's own cancel.
+- **M5 teardown race** — `stop()` nulled the poller thread unconditionally even when a hung probe made `join(2s)` time out → stop/start cycles could spawn overlapping pollers. Reference is kept while alive; emits are wrapped (`_emit_context`) so a mid-teardown change from the worker thread can't raise.
+- **Latent "nudge while idle" bug** — at boot context is UNKNOWN, but WorkTimer was constructed `_active=True` and `main.start()` forced it active too, so on Windows (where pywinctl exists) the nudge could fire after N ticks of *unknown* foreground — exactly the bug class its comment warns about. WorkTimer now defaults inactive; App only arms it from a real WORK classification (`_on_context_changed`). Linux behavior unchanged (probe returns no input → same).
+
+**Shipped (P1 parity):**
+- **M6 retry + caps** — one retry after 2 s backoff on *transport-level* failures only (`APIConnectionError`/`APITimeoutError`/`InternalServerError`/`RateLimitError`, falling back to `httpx.TransportError`); semantic errors still fail fast, App's fallback/cooldown own the UX. `max_tokens: 4096` (koishi parity) passed on every call. **SDK trap found while testing:** this box's venv has openai **3.1.0** (uv.lock pins 2.48.0 — environment drift, see §7 follow-up), and 3.x drops `MaxRetriesExceededError`; a from-import of it would ImportError and silently disable the whole client (`OpenAI = None`). The import is now fault-tolerant per name with the httpx fallback; do not re-add blind SDK-name imports in remote_agent.py.
+- **M8 OS-idle gate** — `health.use_os_idle` (default true) + `afk_cutoff_s: 30`: on Windows each WorkTimer tick reads `GetLastInputInfo`; a gap ≥ cutoff with banked progress zeroes it (StretchBreak's frame-drop-cutoff port, `idle_monitoring.rs`). Off-Windows/any probe failure → None → plain accumulation, zero regression. The dead `work_minutes_changed` signal was removed (never emitted or wired).
+- **M3 stat persistence** — `stats.persist: true`, `state_path: state/stats.json` (**deliberately outside the Obsidian vault**): atomic dot-temp+rename JSON snapshot, save-on-mutation + `flush()` on stop; corrupt/missing-keys/bad-bounds → silent reset to config initial (DyberPet's tolerant-load idiom with our stronger write). Edge states re-arm from hydrated values so booting straight from a saved critical stat doesn't fire spurious signals. Test fixtures set `persist: False` / absolute tmp paths — the repo root is never written by tests (`state/` is gitignored; it can still appear on real runs, e.g. `--smoke`, which flushes on shutdown).
+- **M5 app-name channel + self-filter** — Windows probe now returns `(hwnd, title, app_name)` per poll (one `getActiveWindow()` call; `.getAppName()` is WMI PID→exe at 5 s cadence): exact-match buckets `context.work_apps`/`play_apps` win over title keywords (chrome.exe + "Important Docs" tab = PLAY), unknown apps fall back to title classification. Our own overlay HWND (wired from App via `set_overlay_winid`) is excluded so the always-on-top pet can't classify itself. Probe contract stays backward-compatible: string and 2-tuple probes normalize (`_read_probe_context`), all pre-existing tests pass untouched.
+
+**Deliberately deferred (recorded, not forgotten):** M6 multi-turn history + long-term memory injected into prompts (reference has it; our vault is still write-only from App — the natural next step pairs `write_fact` reads with `build_messages`); M7 SPEC-v3/v4 rituals (multi-op transaction receipts, lint CLI, temporal-archive compaction, propose/review governance) — reference marks them "strip unless needed" for a solo pet; M8 PreBreak 5 s-quiescence pre-gate and break-state persistence across restarts; M3 shop/inventory/coins/FV-level system. Also untouched this pass: `USER_FEEDBACK.md` (this was an audit build, not a user-feedback pass).
+
+**Audit-confirmed-as-already-good (no change needed):** vault write sandboxing + atomic writes are the reference's own contract verbatim and stricter than DyberPet's non-atomic `open('w')`; our hysteresis threshold signals beat DyberPet's plain tier crossing; RLock-only concurrency is SPEC-consistent (spec explicitly excludes distributed locking); the storage-ceiling watcher has no reference counterpart at all — it stays as a local extra.
+
+### 2026-08-20 — Drag sway facing fix: force left-facing while held (C++ `Dragged` port, +1 test)
+User report: "facing LEFT and click-dragging is perfect; facing RIGHT the drag sway mirrors
+sideways — lean goes opposite to where I move." Root cause spans two files and is a *mirror*
+artifact, not an oscillator bug. The pack's `Pinched` (the Dragged action) picks its seven lean
+poses (`shime9..10`) from **world-space** conditions `#{FootX < mascot.environment.cursor.x±N}`,
+and the lean art encodes its tilt relative to *screen* direction — both authored assuming the
+sprite is LEFT-facing. The render mirror in `mascot_engine_widget._on_frame` flips the chosen frame
+whenever `looking_right`, so a right-facing pet was handed an un-mirrored "lean-left" pose that the
+mirror then displayed as "lean-right": the sway read backwards.
+
+**Fix = port of C++ `Dragged.tick()` line 67 `getMascot().setLookRight(false)`:** `_DraggableAction`
+now sets `st.looking_right = False` on every step, so a grabbed pet renders un-mirrored in BOTH
+orientations — exactly the "perfect" left case, for any facing direction. This is what vanilla
+Shimeji-ee does and why its drag sway always reads correctly; it survives future packs (whose lean
+art may go the other way) unlike an alternate sign-flip of the condition evaluation (rejected:
+pack-specific + diverges from reference). On release, `FallAction` re-syncs facing from throw
+velocity as before. Left-facing behavior is a no-op (already false); right-facing snaps to the
+authored left art at grab — a visible 1-frame orientation change that matches real Shimeji-ee.
+
+One regression test (`test_dragged_forces_left_facing`): seed `looking_right=True`, grab, tick →
+assert the flip + lean frames still play. Existing sway tests (shime9/10 fling, pendulum settle)
+still pass untouched. No engine/XML change to the oscillator itself.
 
 ### 2026-08-19 — M9 behavior rebalance: ceiling no longer absorbing (144 tests)
 User report: "the pet always climbs around the ceiling / spends most of its time there."
