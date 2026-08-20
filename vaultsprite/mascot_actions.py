@@ -711,6 +711,10 @@ class _DraggableAction(AnimationAction):   # Dragged / Regist pose sets (in-plac
         st.foot_dx = 0.0
 
     def step(self) -> bool:
+        # C++ Dragged.tick() forces setLookRight(false): the sway lean poses are authored for
+        # the LEFT-facing sprite in world/screen space (Pinched picks shime9..10 by FootX vs
+        # cursor.x), so rendering them mirrored while looking right played the sway BACKWARDS.
+        self.st.looking_right = False
         if not self.tick_ok():
             return False
         # Pendulum (C++ Dragged): footDx = (footDx + (cursorX - footX)*0.1)*0.8 — a damped

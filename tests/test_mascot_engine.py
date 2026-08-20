@@ -269,6 +269,22 @@ def test_dragged_sways_toward_cursor():
     assert "shime10.png" in left, f"expected far-left lean while swinging: {sorted(left)}"
 
 
+def test_dragged_forces_left_facing():
+    """C++ Dragged.tick() calls setLookRight(false) every tick: the sway lean poses are
+    authored for the LEFT-facing sprite (Pinched picks shime9..10 by world-space FootX vs
+    cursor.x), so a pet grabbed while facing RIGHT must snap to left-facing or the render
+    mirror flips the sway backwards — the reported 'sway mirrored sideways when facing
+    right'. Asserts both the orientation flip and that the lean frames still play."""
+    core = make_core(seed=3)
+    core.state.anchor = Vec2(1100, H)
+    core.state.looking_right = True          # caught mid-walk facing right
+    core.state.dragging = True
+    core.env.cursor.x, core.env.cursor.y = 1100, H
+    core.force_behavior("Dragged")
+    core.tick()
+    assert core.state.looking_right is False, "grabbed pet must face left (C++ setLookRight(false))"
+
+
 def test_dragged_pendulum_settles():
     """After the cursor stops, FootX keeps swinging back and forth around it (foot_dx
     alternates sign) and damps back toward the neutral pose — the 'swing like a pendulum'
