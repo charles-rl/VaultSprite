@@ -89,6 +89,16 @@ class Config:
             self.get("animation.config_path", "assets/config.yaml")
         )
 
+    @property
+    def mascot_pack_dir(self) -> Path:
+        """Root of the active Shimeji pack (`mascot.packs[mascot.pack]`), i.e.
+        `<pack>/conf/*.xml` + `<pack>/img/<Name>/*.png`."""
+        packs = self.get("mascot.packs", {}) or {}
+        name = str(self.get("mascot.pack", "") or "").strip()
+        raw = (packs.get(name) if isinstance(packs, dict) else None) or \
+            f"assets/{name}_shimeji"
+        return self.resolve_path(raw)
+
 
 def _apply_env_overrides(raw: dict[str, Any]) -> None:
     for env_name, (dotted_key, cast) in _ENV_OVERRIDES.items():

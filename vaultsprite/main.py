@@ -487,7 +487,10 @@ class App(QObject):
             logger.debug("vault journal failed: %s", exc)
 
     def _setup_tray(self):
-        icon_path = str(Path(self.config.resolve_path("assets/steve_shimeji/img/icon.png")))
+        pack_icon = Path(self.config.mascot_pack_dir) / "img" / "icon.png"
+        if not pack_icon.exists():
+            pack_icon = self.config.resolve_path("assets/steve_shimeji/img/icon.png")
+        icon_path = str(pack_icon)
         names = self.mascot.behavior_names if self.mascot is not None else []
         self._tray = SystemTray(icon_path, names)
         self._tray.scale_changed.connect(self._on_scale_changed)

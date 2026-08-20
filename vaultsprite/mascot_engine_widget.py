@@ -46,8 +46,9 @@ class MascotEngine(QObject):
         self.tick_ms = max(10, int(m.get("tick_ms", 40) or 40))
         self.excluded = set(m.get("excluded_behaviors", []) or [])
         self._px = max(16, int(self.config.get("window.width", 96) or 96))
-        self._mascot_dir = self._resolve_img_dir(
-            self.config.resolve_path(str(m.get("actions_xml", ""))))
+        actions_xml = self._pack_xml_path(actions=True)
+        behaviors_xml = self._pack_xml_path(actions=False)
+        self._mascot_dir = self._resolve_img_dir(actions_xml) if actions_xml else None
 
         self._env = MascotEnvironment(
             ceiling=HBorder(0, 0, 1),
@@ -60,18 +61,21 @@ class MascotEngine(QObject):
         )
         self.core: Optional[MascotCore] = None
         self._enabled = False
-        try:
-            core = MascotCore(self._env, excluded_behaviors=self.excluded)
-            core.parse(
-                self.config.resolve_path(str(m.get("actions_xml", ""))),
-                self.config.resolve_path(str(m.get("behaviors_xml", ""))),
+        if actions_xml is not None and behaviors_xml is not None:
+            try:
+                core = MascotCore(self._env, excluded_behaviors=self.excluded)
+                core.parse(actions_xml, behaviors_xml)
+                core.on_frame_changed = self._on_frame
+                core.on_behavior_changed = self._on_behavior
+                self.core = core
+            except Exception as exc:   # noqa: BLE001 - never let a bad pack kill the app
+                logger.warning("Mascot engine failed to load pack; disabled: %s", exc)
+                self.core = None
+        else:
+            logger.warning(
+                "mascot pack not found under %r — actions/behaviors XML missing, engine off",
+                str(m.get("pack", "")),
             )
-            core.on_frame_changed = self._on_frame
-            core.on_behavior_changed = self._on_behavior
-            self.core = core
-        except Exception as exc:   # noqa: BLE001 - never let a bad pack kill the app
-            logger.warning("Mascot engine failed to load pack; disabled: %s", exc)
-            self.core = None
         if self.core is not None:
             self._install_hide_walk()
 
@@ -286,6 +290,23 @@ class MascotEngine(QObject):
         self._tracked_window = rect
 
     # -- internals --------------------------------------------------------------
+    def _pack_xml_path(self, *, actions: bool) -> Optional[Path]:
+        """Resolve <active_pack>/conf/{actions|behaviors}.xml from config ``mascot.pack``.
+
+        Legacy configs (no ``mascot.pack``/``mascot.packs``, direct
+        ``mascot.actions_xml``/``behaviors_xml`` paths) still work unchanged."""
+        m = self.config.section("mascot")
+        legacy_key = "actions_xml" if actions else "behaviors_xml"
+        raw_legacy = str(m.get(legacy_key, "") or "").strip()
+        pack_name = str(m.get("pack", "") or "").strip()
+        packs = m.get("packs", None)
+        if not (pack_name and isinstance(packs, dict)) and raw_legacy:
+            return self.config.resolve_path(raw_legacy)
+        base = self.config.mascot_pack_dir
+        fname = "actions.xml" if actions else "behaviors.xml"
+        p = base / "conf" / fname
+        return p if p.exists() else None
+
     @staticmethod
     def _resolve_img_dir(actions_xml: Path) -> Optional[Path]:
         """Derive the image set dir (<pack>/img/<Name>) from the actions.xml path."""

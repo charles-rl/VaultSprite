@@ -100,10 +100,12 @@ hide:                        # "hide pet" — walk to the nearest edge, go fully
   step_ms: 20                # walk-to-edge / walk-back step timer interval
   step_px: 6                 # px moved per step (walk speed)
 
-mascot:                      # M9 behavior engine — plays assets/steve_shimeji directly (Shimeji XML)
+mascot:                      # M9 behavior engine — plays a standard Shimeji pack's XML natively
   enabled: true              # when on, the Shimeji engine drives ambient animation + position; off = legacy GIF FSM
-  actions_xml: assets/steve_shimeji/conf/actions.xml
-  behaviors_xml: assets/steve_shimeji/conf/behaviors.xml
+  pack: kazeem               # active pack under mascot.packs (steve | kazeem) — swap to change the pet
+  packs:                     # standard community-pack layout: <pack>/conf/*.xml + <pack>/img/<Name>/*.png
+    steve: assets/steve_shimeji
+    kazeem: assets/kazeem_shimeji
   tick_ms: 40                # Shimeji action clock (~25 ticks/s, matches their Duration units)
   time_scale: 1.0            # multiplies pose durations (Shijima's userScale plumbing): <1 = livelier pet
   smooth_motion: true        # interpolate the window between engine ticks so throws look smooth on high-refresh monitors

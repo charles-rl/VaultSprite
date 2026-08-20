@@ -99,6 +99,15 @@ class FakeConfig:
             raise KeyError(f"missing config section {name!r}")
         return value
 
+    @property
+    def mascot_pack_dir(self):
+        from pathlib import Path
+        packs = self.get("mascot.packs", {}) or {}
+        name = str(self.get("mascot.pack", "") or "").strip()
+        raw = (packs.get(name) if isinstance(packs, dict) else None) or \
+            f"assets/{name}_shimeji"
+        return Path(raw).resolve() if Path(raw).is_absolute() else self.root / raw
+
 
 def spin(qapp_, predicate, timeout_s: float = 3.0) -> bool:
     """Pump the Qt event loop until predicate() is true (or timeout)."""

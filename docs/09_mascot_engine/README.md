@@ -184,9 +184,14 @@ UI layer. `App` stays the sole owner of *external* animation-force decisions.
    anim) are repurposed as **visual-only gags** — a solo-pet ambient flourish that plays the PullUp /
    Divide animation *without spawning a second pet*. Breed itself stays a no-op advance. This keeps
    the solo-pet constraint while rendering every frame in the pack.
-5. **Config** (`config.yaml` `mascot:`): `actions_xml`, `behaviors_xml`, `tick_ms`, `time_scale`,
-   `excluded_behaviors`. `debug.vault_logging` and `debug.telemetry_overlay` default **true**; flip
-   to false once troubleshooting is done.
+5. **Config** (`config.yaml` `mascot:`): `pack` (name key into the `packs` map → pack root dir,
+   e.g. `steve: assets/steve_shimeji`, `kazeem: assets/kazeem_shimeji`) — switch pets by changing one line;
+   the engine resolves `<pack>/conf/{actions,behaviors}.xml` and auto-discovers frames in
+   `<pack>/img/<first subdir>` (mascot_engine_widget.py `_pack_xml_path`). Legacy direct `actions_xml`/
+   `behaviors_xml` paths are still honored if present. Plus `tick_ms`, `time_scale`, `excluded_behaviors`
+   (unknown names inert). Tray icon follows the active pack's `img/icon.png`. Packs must use the
+   standard layout (`conf/*.xml` at pack root) — classic Shimeji-ee packs that nest XML in
+   `img/<Name>/conf/` need the two files copied to pack-level `conf/` first (done for kazeem).
 6. **Testing**: `tests/test_mascot_engine.py` drives `core.tick()` directly — parse the Steve pack,
    assert a Fall from empty air, assert the recovery ladder resets a wedged action, assert Breed
    stays a no-op, and assert the visual-gag behavior plays frames 38–46 without spawning.
