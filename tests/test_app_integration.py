@@ -309,11 +309,14 @@ def test_mascot_interpolation_smooths_window_moves(qapp):
 def test_mascot_respawn_recentres_and_forces_breed_gag(qapp):
     """M9 feedback: changing the scale mid-animation left the pet floating/jumping. respawn()
     recentres the anchor on the floor and replays the breed 'spawned a new version' flourish
-    (PullUpShimeji gag + fall) so the resized pet visibly settles instead of glitching."""
+    (PullUpShimeji gag + fall) so the resized pet visibly settles instead of glitching.
+
+    Pinned to the ``steve`` pack: PullUpShimeji is its breed flourish, and other packs (e.g.
+    kazeem) don't define that behavior name — respawn must then degrade to a plain Fall."""
     from vaultsprite.mascot_engine_widget import MascotEngine
     from tests.conftest import FakeConfig
 
-    eng = MascotEngine(FakeConfig({}))
+    eng = MascotEngine(FakeConfig({"mascot.pack": "steve"}))
     eng.core.state.anchor.x = 10.0
     eng.core.state.anchor.y = 10.0
     eng.respawn()

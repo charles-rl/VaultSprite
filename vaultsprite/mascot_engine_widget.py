@@ -309,13 +309,19 @@ class MascotEngine(QObject):
 
     @staticmethod
     def _resolve_img_dir(actions_xml: Path) -> Optional[Path]:
-        """Derive the image set dir (<pack>/img/<Name>) from the actions.xml path."""
+        """Derive the image set dir (<pack>/img/<Name>) from the actions.xml path.
+
+        Packs normally keep one subdirectory per character (Steve, Kazeem…); some ship a
+        flat ``img/*.png`` layout instead — fall back to ``img/`` itself in that case."""
         pack_root = actions_xml.parent.parent
         img_root = pack_root / "img"
-        if img_root.is_dir():
-            dirs = [d for d in img_root.iterdir() if d.is_dir()]
-            if dirs:
-                return dirs[0]
+        if not img_root.is_dir():
+            return None
+        dirs = [d for d in img_root.iterdir() if d.is_dir()]
+        if dirs:
+            return dirs[0]
+        if any(p.suffix.lower() == ".png" for p in img_root.iterdir()):
+            return img_root
         return None
 
     def _update_env_geometry(self):

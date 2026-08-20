@@ -50,7 +50,7 @@ from .mascot_data import (AnimList, BehaviorDef, BehaviorNode, MascotState, Pose
 from .mascot_environment import (BORDER_TOL, DArea, DVec2, ExpressionCompiler, JSMascot,
                                  MascotEnvironment, Vec2, is_undefined, parse_error)
 from .mascot_vars import ActionVars, _DynOnce, _UNDEFINED, _UNDEFINED_TYPE2, _coerce_literal
-from .mascot_xml import _attr_of, _attrs, _iter_elements, _load, local_name, ns_el
+from .mascot_xml import _attr_of, _attrs, _iter_elements, _load, local_name
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,9 @@ class MascotCore:
                     if src is not None:
                         pool_children.append(src)
         self.initial_pool = _FlatSources(pool_children)
+        # localized packs: expose the canonical-English names alongside the authored ones
+        for authored, defn in list(self.behavior_defs.items()):
+            self._register_alias(self.behavior_defs, authored, self.BEHAVIOR_NAME_ALIASES, defn)
         # reserved built-ins that must exist (C++ behaviors.xml ALWAYS REQUIRED section)
         for builtin in ("Fall", "Dragged", "Thrown"):
             defn = self.behavior_defs.get(builtin)
@@ -122,6 +125,30 @@ class MascotCore:
         "SplitIntoTwo": "Divide1",
         "PullUpShimeji": "PullUpShimeji1",
     }
+
+    #: Community packs ship fully localized — e.g. the ja-JP Shimeji-ee build renames actions
+    #: and behaviors to Japanese. The engine (recovery ladder) and App reference a few names by
+    #: their canonical English spelling, so at parse time register those definitions under both
+    #: the authored name and its alias (authored first; no clobbering). Unknown localized names
+    #: simply stay JP-named — the roulette resolves them internally either way.
+    BEHAVIOR_NAME_ALIASES: dict[str, str] = {
+        "落下する": "Fall",
+        "ドラッグされる": "Dragged",
+        "投げられる": "Thrown",
+        "立ってボーっとする": "StandUp",
+        "座ってボーっとする": "SitDown",
+        "寝そべってボーっとする": "LieDown",
+        "座ってマウスのほうを見る": "SitAndFaceMouse",
+    }
+    ACTION_NAME_ALIASES: dict[str, str] = {
+        "歩く": "Walk",
+    }
+
+    def _register_alias(self, defs: dict, authored: str, alias_table: dict[str, str], value):
+        alias = alias_table.get(authored)
+        if alias is not None and alias not in defs:
+            defs[alias] = value
+
 
     def _link_breed_gags(self):
         for beh_name, act_name in self.BREED_GAG_ACTIONS.items():
@@ -152,6 +179,7 @@ class MascotCore:
                     if existing is not None and from_pack:      # first definition wins (C++ overwrites; keep ours on merge)
                         continue
                     self.actions[name] = parsed
+                    self._register_alias(self.actions, name, self.ACTION_NAME_ALIASES, parsed)
 
     def _parse_action(self, el: ET.Element, child: bool) -> Optional[Action]:
         ln = local_name(el.tag)
@@ -185,7 +213,7 @@ class MascotCore:
         for sub in list(el):
             sln = local_name(sub.tag)
             if sln == "Animation":
-                poses = [self._parse_pose(p) for p in sub.findall(f"{ns_el(sub.tag)}Pose")]
+                poses = [self._parse_pose(p) for p in sub if local_name(p.tag) == "Pose"]
                 if poses:
                     anims.append(AnimList(poses, str(_attr_of(sub, "Condition", "true") or "true")))
             elif sln == "Action":
@@ -286,7 +314,7 @@ class MascotCore:
         # next pool: <NextBehavior Add=...> with BehaviorReference children (cond-gated)
         next_children: list[_PoolSource] = []
         add_next = False
-        for sub in el.findall(f"{ns_el(el.tag)}NextBehavior"):
+        for sub in [c for c in el if local_name(c.tag) == "NextBehavior"]:
             add_next = str(_attr_of(sub, "Add", "")).strip().lower() == "true"
             for ref in list(sub):
                 if local_name(ref.tag) == "BehaviorReference":

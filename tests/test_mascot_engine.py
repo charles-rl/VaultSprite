@@ -31,6 +31,27 @@ def make_core(seed: int = 1, excluded=None) -> MascotCore:
     return core
 
 
+DIETER_ACTIONS = REPO / "assets" / "dieter_shimeji" / "conf" / "actions.xml"
+DIETER_BEHAVIORS = REPO / "assets" / "dieter_shimeji" / "conf" / "behaviors.xml"
+
+
+def make_dieter_core(seed: int = 1) -> MascotCore:
+    """The ja-JP localized pack: tags, attribute keys AND enum values are Japanese; the
+    parser must normalize them to the same canonical form as English packs."""
+    env = MascotEnvironment(
+        ceiling=HBorder(0, 0, W),
+        floor=HBorder(H, 0, W),
+        screen=DArea(0, W, H, 0),
+        work_area=DArea(0, W, H, 0),
+        active_ie=DArea.invisible(),
+        allows_breeding=False,
+        mascot_count=1,
+    )
+    core = MascotCore(env, rng=random.Random(seed))
+    core.parse(DIETER_ACTIONS, DIETER_BEHAVIORS)
+    return core
+
+
 def test_parses_full_pack():
     core = make_core()
     assert len(core.behavior_defs) >= 50
@@ -514,3 +535,53 @@ def test_evaluator_malformed_fails_closed():
     core = make_core()
     # division by zero -> NaN, not a crash
     assert ExpressionCompiler("mascot.anchor.x / 0").eval_value(core.js_view, core.rng) is not None
+
+
+# -- localized (ja-JP) pack: dieter_shimeji ----------------------------------------
+
+def test_dieter_ja_pack_parses_like_english_packs():
+    """The dieter pack ships Japanese-localized XML (<動作 名前=… 種類="移動">). The parser must
+    normalize tags/attributes/values to the canonical English form so it yields the same shape:
+    a full action set, a full behavior pool, and parsed poses in every animation action."""
+    core = make_dieter_core()
+    assert len(core.behavior_defs) >= 50
+    assert len(core.actions) >= 80
+    used = {p.image for a in core.actions.values() for anim in getattr(a, "anims", []) or []
+            for p in anim.poses}
+    # every animation-typed action has at least one parsed pose (the <ポーズ> children must be
+    # found despite the localized tag name)
+    anim_actions = [a for a in core.actions.values() if getattr(a, "anims", None)]
+    assert all(len(a.anims) and any(anim.poses for anim in a.anims) for a in anim_actions), \
+        f"an action lost its {len([a for a in anim_actions if not any(x.poses for x in (a.anims or []))])} pose(s)"
+    assert len(used) >= 40, "too few distinct frames referenced — pose parsing broken"
+
+
+def test_dieter_ja_pack_forced_behavior_names_resolve():
+    """App forces behaviors by their canonical English names and the recovery ladder looks up
+    Fall/Dragged/Thrown — localized packs must expose both the authored (JP) name AND its
+    English alias, or drag/throw/nudge silently degrade."""
+    core = make_dieter_core()
+    for name in ("Fall", "Dragged", "Thrown", "SitDown", "StandUp", "LieDown", "SitAndFaceMouse"):
+        assert name in core.behavior_defs, f"missing canonical behavior alias {name!r}"
+    # and the authored JP names are still first-class (the roulette picks them directly)
+    assert "落下する" in core.behavior_defs
+
+
+def test_dieter_ja_pack_falls_and_lands():
+    """End-to-end through the localized pack: force a fall from mid-air and verify physics +
+    landing behave exactly as for English packs."""
+    core = make_dieter_core()
+    core.state.anchor = Vec2(W // 2, 100)
+    core.force_behavior("Fall")
+    for _ in range(500):
+        core.tick()
+        if core.state.anchor.y >= H - 2:
+            break
+    assert core.state.anchor.y >= H - 2, f"never landed: y={core.state.anchor.y}"
+
+
+def test_dieter_action_names_resolve_walk_for_hide_walk():
+    """The hide/show walk-off reuses the pack's Walk action via a name lookup — it must be
+    reachable under its canonical English alias on localized packs."""
+    core = make_dieter_core()
+    assert "Walk" in core.actions and "歩く" in core.actions

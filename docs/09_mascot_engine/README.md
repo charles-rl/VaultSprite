@@ -190,8 +190,13 @@ UI layer. `App` stays the sole owner of *external* animation-force decisions.
    `<pack>/img/<first subdir>` (mascot_engine_widget.py `_pack_xml_path`). Legacy direct `actions_xml`/
    `behaviors_xml` paths are still honored if present. Plus `tick_ms`, `time_scale`, `excluded_behaviors`
    (unknown names inert). Tray icon follows the active pack's `img/icon.png`. Packs must use the
-   standard layout (`conf/*.xml` at pack root) — classic Shimeji-ee packs that nest XML in
-   `img/<Name>/conf/` need the two files copied to pack-level `conf/` first (done for kazeem).
+   standard layout (`conf/*.xml` at pack root; frames in `img/<Name>/` or flat `img/`) — classic
+   Shimeji-ee packs that nest XML in `img/<Name>/conf/` need the two files copied to pack-level
+   `conf/` first (done for kazeem). **Localized packs work unmodified**: ja-JP Shimeji-ee builds
+   ship Japanese element tags/attribute keys and enum values (`<動作 名前=… 種類="移動">`) — the
+   parser normalizes them at the XML boundary (`mascot_xml.py` `_TAG_ALIAS`/`_ATTR_ALIAS`/
+   `_VALUE_ALIASES`) and registers a handful of canonical English name aliases so the App's forced
+   behaviors (Fall/Dragged/Thrown/SitDown/…) still resolve on localized packs (see dieter).
 6. **Testing**: `tests/test_mascot_engine.py` drives `core.tick()` directly — parse the Steve pack,
    assert a Fall from empty air, assert the recovery ladder resets a wedged action, assert Breed
    stays a no-op, and assert the visual-gag behavior plays frames 38–46 without spawning.

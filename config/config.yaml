@@ -102,10 +102,11 @@ hide:                        # "hide pet" — walk to the nearest edge, go fully
 
 mascot:                      # M9 behavior engine — plays a standard Shimeji pack's XML natively
   enabled: true              # when on, the Shimeji engine drives ambient animation + position; off = legacy GIF FSM
-  pack: kazeem               # active pack under mascot.packs (steve | kazeem) — swap to change the pet
+  pack: kazeem               # active pack under mascot.packs (steve | kazeem | dieter) — swap to change the pet
   packs:                     # standard community-pack layout: <pack>/conf/*.xml + <pack>/img/<Name>/*.png
     steve: assets/steve_shimeji
     kazeem: assets/kazeem_shimeji
+    dieter: assets/dieter_shimeji   # ja-JP localized XML (parser normalizes tags/attrs/values)
   tick_ms: 40                # Shimeji action clock (~25 ticks/s, matches their Duration units)
   time_scale: 1.0            # multiplies pose durations (Shijima's userScale plumbing): <1 = livelier pet
   smooth_motion: true        # interpolate the window between engine ticks so throws look smooth on high-refresh monitors
