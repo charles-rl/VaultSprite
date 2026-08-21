@@ -586,6 +586,45 @@ which the overlay renders as a fourth row (`hunger=… | energy=… | boredom=�
 
 ## 9. Changelog
 
+### 2026-08-21 — Side-margin fix: pet no longer half-clipped at the side walls (190 tests)
+User feedback: with the newer packs in use (kazeem/dieter/sesame), the old "wall grip" clamp cut off
+~half of the sprite's body when it walked along a screen edge — legs invisible. Those packs' art fills
+the whole 128×128 canvas (Steve's does not: his figure is narrow/centered with transparent padding, and
+his XML anchors sit at x=32..96), so pinning the feet anchor to `geo.left()/geo.right()` put half the
+square window — hence most of the body — off-screen.
+
+**Change (render-only; engine physics/border detection untouched):** `_clamp_pos` now clamps in WINDOW
+space instead of anchor space, keeping the whole sprite inside the work area on all four sides:
+- `mascot_engine_widget.py::_clamp_pos` — horizontal: `wx = max(geo.left(), min(ax - px//2, geo.left() + geo.width() - px))`
+  (left wall → window x == geo.left(); right wall → window's last column flush at `right()-1`, Qt coords
+  are inclusive). Vertical contract unchanged: head at the top edge (`y == geo.top()`), feet on the floor
+  line. Note: `ax - px//2` keeps an anchor that sits ON a border visible (its window is pulled in, never
+  clipped) — different convention from the engine's own `Mascot.java:getBounds` which would overhang by
+  the image-anchor offset; here we prefer "always fully visible" since the reference app relies on the
+  user dragging/throwing to reach edges anyway.
+- `mascot_sequence_widget.py::_window_pos_for_anchor` — identical math for the Sesame/lacis sequence
+  backend (same convention, same docstring cross-ref).
+- `MascotEngine.start()` seed position now routes through `_clamp_pos` instead of raw `anchor - px//2`.
+- Test updated: `tests/test_app_integration.py::test_mascot_engine_clamps_off_screen_targets` asserts the
+  NEW contract (`x + px == geo.left() + geo.width()` / `x == geo.left()`; floor/top assertions kept).
+
+**REVERT RECIPE (if you swap back to steve and want the old half-overhang grip):** the pre-fix version is
+commit `69b98bb` ("Feedback pass: edge grip…", 2026-08-18) as amended by `a414896`. Restore with
+`git show a414896:vaultsprite/mascot_engine_widget.py` (see `_clamp_pos`) and
+`git show a414896:vaultsprite/mascot_sequence_widget.py` (see `_window_pos_for_anchor`), i.e. replace the
+horizontal clamp with anchor-space: `ax = max(geo.left(), min(ax, geo.right()))` then return
+`(ax - px//2, ay - px)` — window overhangs half its width at each side wall; revert the test assertions to
+`x + px//2 == geo.right()` / `x + px//2 == geo.left()`. Rationale for the original look: a narrow pack like
+Steve reads as "gripping" when half on the wall, and it lets the feet reach exactly the corner where floor
+meets wall (new inset = corner gap of `px/2`). No config knob was added by user decision — if you want both,
+a future agent can lift the horizontal clamp into a config key (suggested: `mascot.edge_inset`, bool or px)
+without touching anything else; everything is already funnelled through these two functions.
+
+**Not changed:** vertical clamps (head-top/feet-floor), engine-side border logic in `mascot_actions.py`
+(FallAction work-area clamp, `_border_type_ok`) — those still let the anchor sit ON a wall so climb/grip
+behaviors trigger; only its *rendered* position is inset. Hide/show walk-off-screen (App-owned) unaffected:
+it moves the window past `geo.left()-w`/`geo.right()` directly and suppresses `_clamp_pos`.
+
 ### 2026-08-20 — T-pass: ambient SFX + telemetry stats wired; memory features scoped for a future agent (177 tests)
 User decision: skip vault→LLM read-back and the M9 tracked-window bridge for now, build only the medium-to-trivial items from the gap list, and record the skipped ones in detail here.
 

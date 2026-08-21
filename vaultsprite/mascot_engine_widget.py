@@ -160,7 +160,7 @@ class MascotEngine(QObject):
             if self._rendered_frame:
                 break
         st = self.core.state
-        self._pos_cur = (int(st.anchor.x) - self._px // 2, int(st.anchor.y) - self._px)
+        self._pos_cur = self._clamp_pos(int(st.anchor.x), int(st.anchor.y))
         self._timer.start()
 
     def stop(self):
@@ -356,11 +356,11 @@ class MascotEngine(QObject):
                                          tracked_window=self._tracked_window)
             self.core.tick()
             # move the window to follow the core anchor (unless the user is dragging it
-            # or App is walking the pet off-screen during hide/show). The anchor is clamped
-            # to the work-area borders so the pet grips the side walls and reaches up to the
-            # top edge (sprite stays upright and on-screen) while never running off-screen —
-            # a Dash toward an off-screen cursor.x or a huge Math.random TargetX still can't
-            # escape; the interpolator then smooths the move between engine ticks.
+            # or App is walking the pet off-screen during hide/show). _clamp_pos keeps the
+            # WHOLE sprite inside the work area (flush at the side walls, head at the top,
+            # feet on the floor) while never running off-screen — a Dash toward an off-screen
+            # cursor.x or a huge Math.random TargetX still can't escape; the interpolator then
+            # smooths the move between engine ticks.
             if not self._dragging and not self._hide_walking:
                 st = self.core.state
                 x, y = self._clamp_pos(int(st.anchor.x), int(st.anchor.y))
@@ -373,22 +373,32 @@ class MascotEngine(QObject):
 
     # -- motion helpers --------------------------------------------------------
     def _clamp_pos(self, ax: int, ay: int) -> tuple[int, int]:
-        """Clamp the ANCHOR (feet) to the work-area borders and derive the window's
-        top-left. The sprite is always drawn UPRIGHT (no upside-down ceiling flip): the
-        feet reach the side walls (body overhangs by half its size) and up to the top edge
-        (head touches the screen top), but the clamp keeps it on-screen so a Dash/Throw
-        target outside the work area pins the feet on the edge instead of pushing the
-        whole window off the monitor. Returns (x, y) window pos."""
+        """Clamp so the WHOLE sprite window stays inside the work area; returns (x, y)
+        window top-left. The sprite is always drawn UPRIGHT (no upside-down ceiling flip):
+        horizontally it stops flush at each side wall — full-canvas packs (kazeem/dieter/
+        sesame) keep their body and legs visible while walking along an edge instead of
+        being clipped by the screen border — and vertically its head reaches the top edge /
+        feet reach the floor (unchanged from before). The clamp still pins a Dash/Throw
+        target outside the work area on-screen instead of pushing the whole window off the
+        monitor.
+
+        History: until 2026-08-21 this clamped the ANCHOR to [left, right] and derived
+        x = ax - px//2, so at a side wall half the square sprite window overhung off-screen
+        ("grip" look for Steve's narrow art). Revert recipe: build notes §9 (2026-08-21 pass)
+        + `git show a414896:vaultsprite/mascot_engine_widget.py`."""
+        px = self._px
         screen = QApplication.primaryScreen()
-        if screen is not None:
-            geo = screen.availableGeometry()
-            px = self._px
-            ax = max(geo.left(), min(ax, geo.right()))
-            # keep the upright sprite's top (ay - px) at/above the screen top
-            ay = max(geo.top() + px, min(ay, geo.bottom()))
-        else:
-            px = self._px
-        return ax - px // 2, ay - px         # body rises ABOVE the feet
+        if screen is None:
+            return ax - px // 2, ay - px     # no geometry → raw anchor-derived position
+        geo = screen.availableGeometry()
+        # clamp in WINDOW space (x, y top-left): x=left at the left wall and the window's last
+        # column at right()-1 flush with the work area at the right — so odd sprite sizes land
+        # exactly on both walls instead of overhanging or shifting by a pixel.
+        hi = max(geo.left(), geo.left() + geo.width() - px)
+        wx = max(geo.left(), min(ax - px // 2, hi))
+        # vertical (unchanged contract): head at/below the screen top, feet on the floor line
+        wy = max(geo.top(), min(ay - px, geo.top() + geo.height() - px))
+        return wx, wy                         # body rises ABOVE the feet
 
     def _set_target(self, x: int, y: int):
         """Route an engine position to the window — directly or through the lerp timer."""

@@ -256,10 +256,11 @@ def test_injected_throw_survives_tick_refresh(qapp):
 
 def test_mascot_engine_clamps_off_screen_targets(qapp):
     """M9 feedback: a throw/run toward an off-screen target must never leave the monitor.
-    ``_clamp_pos`` now pins the ANCHOR (feet) to the work-area borders so the pet reaches the
-    side walls (body overhangs by half its size) and up to the top edge — always drawn UPRIGHT
-    — while a Dash toward ``cursor.x``/a big ``Math.random`` TargetX can no longer walk the
-    whole pet off-screen."""
+    ``_clamp_pos`` pins the ANCHOR so the WHOLE sprite window stays in the work area (2026-08-21:
+    full-canvas packs like kazeem/dieter/sesame were half-clipped at the side walls when the feet
+    could reach them) — always drawn UPRIGHT — while a Dash toward ``cursor.x``/a big
+    ``Math.random`` TargetX can no longer walk the whole pet off-screen. The vertical clamps are
+    unchanged: head touches the top edge, feet touch the floor."""
     from PySide6.QtWidgets import QApplication
     from vaultsprite.mascot_engine_widget import MascotEngine
     from tests.conftest import FakeConfig
@@ -268,15 +269,17 @@ def test_mascot_engine_clamps_off_screen_targets(qapp):
     geo = QApplication.primaryScreen().availableGeometry()
     px = eng._px
 
-    # far past the right / bottom → feet clamp onto the right wall / floor (no runaway)
+    # Qt's right()/bottom() are INCLUSIVE (last pixel); the work area ends at left+width.
+    # far past the right / bottom → the window sits flush against the right wall and its last
+    # row on the floor line (no runaway; nothing overhangs a side wall)
     x, y = eng._clamp_pos(geo.right() + 9999, geo.bottom() + 9999)
-    assert x + px // 2 == geo.right()          # feet pinned to the right wall
-    assert y + px == geo.bottom()              # feet pinned to the floor
+    assert x + px == geo.left() + geo.width()   # whole sprite window inside at the right wall
+    assert y + px == geo.top() + geo.height()   # feet pinned to the floor line
 
-    # far past the left / top → the sprite stays upright and on-screen: it reaches up so its
-    # top touches the screen top (y == geo.top) and overhangs the left side by half its size
+    # far past the left / top → upright and fully on-screen: left edge at geo.left(), top at
+    # geo.top() (the head touches the screen top, nothing overhangs the left side)
     x, y = eng._clamp_pos(geo.left() - 9999, geo.top() - 9999)
-    assert x + px // 2 == geo.left()           # feet pinned to the left wall
+    assert x == geo.left()                     # whole sprite window inside at the left wall
     assert y == geo.top()                      # sprite top at the screen top (still visible)
 
 

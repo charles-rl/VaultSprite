@@ -1,13 +1,12 @@
-# User feedback — pack switching: kazeem/dieter/sesame backends (latest pass)
+# User feedback — side-margin clipping at screen edges (latest pass, 2026-08-21)
 
 | Note | Resolution |
 |---|---|
-| Swap between shimejis from config without breaking code; support the JP pack and the Android bundle too | `mascot.pack` + `packs:` map (steve\|kazeem\|dieter\|sesame). Kazeem: XMLs copied to `conf/`. Dieter (ja-JP): parser normalizes JP tags/attrs/values at the XML boundary (`mascot_xml.py`) + English name aliases for forced behaviors. **Sesame/lacis** (Android bundle, NOT XML): separate additive backend — `mascot_sequence_pack.py` (pure-Python FSM over `animation.json`, no Qt) + `mascot_sequence_widget.py` (same signal/method surface as MascotEngine); App selects by pack content (`manifest.json` present), PC/XML path byte-unchanged. |
-
-Sesame compromises (data has less than a PC pack): no window(IE)/mouse-face art; throw = fling pose + gravity integration of flick velocity; feet anchored bottom-center (art is full-canvas, tune via `window.width`); idle self-loop given a synthesized 12-36 s budget so it always returns to ambient (Android exits it by tap — nothing taps here). Ceiling-hang frames flipped vertically only for CEILING animations. Not changed: global `mascot.excluded_behaviors` knob stays single; PC packs keep their exact behavior. **190 tests.**
+| With kazeem/dieter/sesame active the old wall-grip clamp clipped ~half the body/legs when walking along a screen edge (their art fills the full 128×128 canvas; Steve's is narrow so it "looked right" there) | Reverted `_clamp_pos` to window-space clamping: whole sprite stays inside the work area, flush at side walls / head top / feet floor — `mascot_engine_widget.py::_clamp_pos` + same in `mascot_sequence_widget.py::_window_pos_for_anchor`; test updated. Engine-side border logic unchanged (anchor still sits ON a wall so climb/grip behaviors fire); no config knob (user decision). **Revert recipe if you want the Steve half-overhang look back:** BUILD_NOTES.md §9 2026-08-21 entry + `git show a414896:vaultsprite/mascot_engine_widget.py`. **190 tests.** |
 
 # Previous passes
-- 2026-08-20 — drag-sway facing (`setLookRight(false)` port); legacy-direct-XML configs still honored alongside the pack map.
-- 2026-08-19 — ceiling rebalance (unhide `FallFromCeiling`/wall/floor idles so the "On Ceiling" pool re-rolls climb vs fall); M4/M7 review fixes. **144 tests.**
-- 2026-08-18 — on-screen clamp, throw smoothing, scale respawn; wall/ceiling grip, drag-release snap-back, pendulum sway settle, breed gag (`e1878ff`→`a414896`). **139 tests.**
+- 2026-08-20 — pack switching: kazeem/dieter/sesame backends (`mascot.pack` + `packs:` map; JP XML aliases in `mascot_xml.py`; Android-bundle FSM backend `mascot_sequence_pack/widget`). Sesame compromises: no IE/window art, synthesized idle budget. **190 tests.**
+- 2026-08-20 — drag-sway facing (`setLookRight(false)` port); legacy direct-XML configs still honored alongside the pack map.
+- 2026-08-19 — ceiling rebalance (unhide `FallFromCeiling`/wall/floor idles so "On Ceiling" re-rolls climb vs fall); M4/M7 review fixes. **144 tests.**
+- 2026-08-18 — on-screen clamp, throw smoothing, scale respawn; wall/ceiling grip (the half-overhang look now replaced), drag-release snap-back, sway settle, breed gag (`e1878ff`→`a414896`). **139 tests.**
 - 2026-08-17 — landing loop, pendulum swing-back, hide-walk walk-off-screen + reveal, alignment. **122 tests.**

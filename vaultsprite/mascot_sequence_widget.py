@@ -241,14 +241,19 @@ class MascotSequenceWidget(QObject):
                          Qt.TransformationMode.SmoothTransformation)
 
     def _window_pos_for_anchor(self, ax: float, ay: float) -> tuple[int, int]:
-        """Anchor = feet at bottom-center of the square frame; keep it on-screen (like MascotEngine)."""
-        screen = QApplication.primaryScreen()
+        """Anchor = feet at bottom-center of the square frame; keep the whole window on-screen.
+
+        Mirrors MascotEngine._clamp_pos (2026-08-21): clamps in window space so full-canvas
+        bundle art sits flush against a side wall instead of being clipped by the screen."""
         px = self._px
-        if screen is not None:
-            geo = screen.availableGeometry()
-            ax = max(geo.left(), min(ax, float(geo.right())))
-            ay = max(float(geo.top()) + px, min(ay, float(geo.bottom())))
-        return int(ax) - px // 2, int(ay) - px
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return int(ax) - px // 2, int(ay) - px
+        geo = screen.availableGeometry()
+        hi = max(float(geo.left()), float(geo.left()) + geo.width() - px)
+        wx = max(float(geo.left()), min(int(ax) - px // 2, hi))
+        wy = max(float(geo.top()), min(int(ay) - px, float(geo.top()) + geo.height() - px))
+        return int(wx), int(wy)
 
     def _set_target(self, x: int, y: int):
         if not self._smooth:
